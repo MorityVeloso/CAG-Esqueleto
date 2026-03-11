@@ -37,6 +37,16 @@ describe('CAGEngine', () => {
     expect(result).toBe(engine);
   });
 
+  it('should accept string input as query', async () => {
+    const config = createTestConfig();
+    engine.registerStaticCag(new StaticCagCache(config));
+    await engine.initialize();
+
+    // Query will fail (no API adapter) but it should accept a plain string
+    await expect(engine.query('test')).rejects.toThrow('AnthropicAdapter');
+    await engine.shutdown();
+  });
+
   it('should emit events', async () => {
     const events: string[] = [];
     engine.on((event) => events.push(event.type));
@@ -53,8 +63,6 @@ describe('CAGEngine', () => {
       // Expected — no adapter connected
     }
 
-    // cache_miss should have been emitted if semantic cache was registered
-    // Without semantic cache, no events expected before API call
     await engine.shutdown();
   });
 });

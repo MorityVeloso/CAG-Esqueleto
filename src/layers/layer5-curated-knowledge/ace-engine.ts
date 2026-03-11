@@ -3,17 +3,11 @@
  *
  * The self-managing layer. Automatically curates, prioritizes,
  * and maintains knowledge without manual intervention.
- *
- * Responsibilities:
- *  - Auto-categorize new knowledge
- *  - Track usage and prioritize high-value entries
- *  - Evict stale/low-value entries
- *  - Serve relevant knowledge for queries
  */
 
 import type {
   ICuratedKnowledgeLayer,
-  KnowledgeEntry,
+  CuratedKnowledgeEntry,
   CAGConfig,
 } from '@core/types.js';
 import { KnowledgeStore } from './knowledge-store.js';
@@ -27,15 +21,8 @@ export class ACEEngine implements ICuratedKnowledgeLayer {
   private readonly store = new KnowledgeStore();
   private readonly priority = new PrioritySystem();
 
-  /** Embedding function for relevance search (injected) */
-  private embedFn: ((text: string) => Promise<number[]>) | null = null;
-
   constructor(config: CAGConfig) {
     this.config = config;
-  }
-
-  setEmbeddingFunction(fn: (text: string) => Promise<number[]>): void {
-    this.embedFn = fn;
   }
 
   async initialize(): Promise<void> {}
@@ -44,11 +31,17 @@ export class ACEEngine implements ICuratedKnowledgeLayer {
     this.store.clear();
   }
 
-  /**
-   * Add a new knowledge entry.
-   * Auto-evicts lowest priority entries if over limit.
-   */
-  async addKnowledge(entry: KnowledgeEntry): Promise<void> {
+  async addEntry(
+    input: Omit<CuratedKnowledgeEntry, 'id' | 'usageCount' | 'lastUsedAt' | 'createdAt'>,
+  ): Promise<CuratedKnowledgeEntry> {
+    const entry: CuratedKnowledgeEntry = {
+      ...input,
+      id: `ck_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      usageCount: 0,
+      lastUsedAt: new Date(),
+      createdAt: new Date(),
+    };
+
     this.store.add(entry);
 
     // Evict if over limit
@@ -60,32 +53,30 @@ export class ACEEngine implements ICuratedKnowledgeLayer {
         this.store.remove(id);
       }
     }
+
+    return entry;
   }
 
-  /**
-   * Get knowledge entries most relevant to a query.
-   *
-   * Currently uses simple keyword matching.
-   * TODO: Use embeddings for semantic relevance when embedFn is available.
-   */
-  async getRelevantKnowledge(query: string, limit = 5): Promise<KnowledgeEntry[]> {
+  async getRelevant(query: string, limit = 5): Promise<CuratedKnowledgeEntry[]> {
     const allEntries = this.store.getAll();
     if (allEntries.length === 0) return [];
+
+    // Filter by minimum priority
+    const minPriority = this.config.layers.curatedKnowledge.minPriority;
+    const eligible = allEntries.filter((e) => e.priority >= minPriority);
 
     // Simple keyword relevance scoring
     const queryWords = new Set(query.toLowerCase().split(/\W+/).filter((w) => w.length > 2));
 
-    const scored = allEntries.map((entry) => {
+    const scored = eligible.map((entry) => {
       const contentWords = entry.content.toLowerCase().split(/\W+/);
       const overlap = contentWords.filter((w) => queryWords.has(w)).length;
       return { entry, relevance: overlap };
     });
 
     scored.sort((a, b) => b.relevance - a.relevance);
-
     const results = scored.slice(0, limit).filter((s) => s.relevance > 0).map((s) => s.entry);
 
-    // Record usage
     for (const entry of results) {
       this.store.recordUsage(entry.id);
     }
@@ -93,27 +84,13 @@ export class ACEEngine implements ICuratedKnowledgeLayer {
     return results;
   }
 
-  /**
-   * Re-prioritize all entries using the priority system.
-   */
-  async prioritize(): Promise<void> {
-    if (!this.config.layers.curatedKnowledge.autoPrioritize) return;
-
-    const entries = this.store.getAll();
-    const scores = this.priority.score(entries);
-
-    // Update priorities in store
-    for (const score of scores) {
-      const entry = this.store.get(score.entryId);
-      if (entry) {
-        entry.priority = score.score;
-      }
+  async decayPriorities(): Promise<void> {
+    const factor = this.config.layers.curatedKnowledge.decayFactor;
+    for (const entry of this.store.getAll()) {
+      entry.priority = Math.max(0, entry.priority * factor);
     }
   }
 
-  /**
-   * Remove entries unused for 30+ days.
-   */
   async removeStale(): Promise<number> {
     return this.store.removeStale(30);
   }

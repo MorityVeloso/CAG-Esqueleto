@@ -1,23 +1,25 @@
 /**
  * Layer 1 — Knowledge Loader
- * Loads and prepares static knowledge from various sources.
+ * Loads and prepares static knowledge from various StaticSource types.
  */
 
-import type { KnowledgeSource } from '@core/types.js';
+import type { StaticSource } from '@core/types.js';
 
 export class KnowledgeLoader {
-  private sources: Map<string, KnowledgeSource> = new Map();
+  private sources: Map<string, { source: StaticSource; resolvedContent: string }> = new Map();
 
   /**
-   * Load knowledge from multiple sources.
-   * Validates and deduplicates entries.
+   * Load knowledge from StaticSource definitions.
+   * Resolves content from text, file, or function sources.
+   * Sorted by priority (highest first).
    */
-  async load(sources: KnowledgeSource[]): Promise<void> {
-    for (const source of sources) {
-      if (!source.content.trim()) {
-        continue;
-      }
-      this.sources.set(source.id, source);
+  async load(sources: StaticSource[]): Promise<void> {
+    const sorted = [...sources].sort((a, b) => b.priority - a.priority);
+
+    for (const source of sorted) {
+      const content = await this.resolveContent(source);
+      if (!content.trim()) continue;
+      this.sources.set(source.id, { source, resolvedContent: content });
     }
   }
 
@@ -28,9 +30,8 @@ export class KnowledgeLoader {
   buildSystemPrompt(): string {
     if (this.sources.size === 0) return '';
 
-    const blocks = Array.from(this.sources.values()).map((source) => {
-      const tag = source.type === 'json' ? 'data' : 'knowledge';
-      return `<${tag} id="${source.id}" type="${source.type}">\n${source.content}\n</${tag}>`;
+    const blocks = Array.from(this.sources.values()).map(({ source, resolvedContent }) => {
+      return `<knowledge id="${source.id}" name="${source.name}" category="${source.category}" priority="${source.priority}">\n${resolvedContent}\n</knowledge>`;
     });
 
     return blocks.join('\n\n');
@@ -38,14 +39,12 @@ export class KnowledgeLoader {
 
   /**
    * Get total token estimate for loaded knowledge.
-   * Rough estimate: 1 token ≈ 4 chars for English, 2 chars for other languages.
    */
   estimateTokens(): number {
     let totalChars = 0;
-    for (const source of this.sources.values()) {
-      totalChars += source.content.length;
+    for (const { resolvedContent } of this.sources.values()) {
+      totalChars += resolvedContent.length;
     }
-    // Conservative estimate (mix of English and other languages)
     return Math.ceil(totalChars / 3);
   }
 
@@ -55,5 +54,20 @@ export class KnowledgeLoader {
 
   clear(): void {
     this.sources.clear();
+  }
+
+  private async resolveContent(source: StaticSource): Promise<string> {
+    switch (source.type) {
+      case 'text':
+        return source.content ?? '';
+      case 'function':
+        if (!source.loadFn) return '';
+        return source.loadFn();
+      case 'file':
+        // File loading deferred to fs adapter; use content if provided
+        return source.content ?? '';
+      default:
+        return '';
+    }
   }
 }

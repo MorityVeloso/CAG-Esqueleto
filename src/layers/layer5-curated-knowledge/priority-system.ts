@@ -1,11 +1,11 @@
 /**
  * Layer 5 — Auto-Prioritization System
  *
- * Ranks knowledge entries by usage frequency, recency, and relevance.
- * Low-priority entries are candidates for eviction when storage is full.
+ * Ranks knowledge entries by usage frequency, recency, and category.
+ * Supports configurable decay factor for priority aging.
  */
 
-import type { KnowledgeEntry } from '@core/types.js';
+import type { CuratedKnowledgeEntry } from '@core/types.js';
 
 export interface PriorityScore {
   entryId: string;
@@ -20,18 +20,11 @@ export interface PriorityScore {
 export class PrioritySystem {
   private categoryWeights: Map<string, number> = new Map();
 
-  /**
-   * Set importance weight for a knowledge category.
-   * Higher weight = higher priority.
-   */
   setCategoryWeight(category: string, weight: number): void {
     this.categoryWeights.set(category, weight);
   }
 
-  /**
-   * Calculate priority scores for all entries.
-   */
-  score(entries: KnowledgeEntry[]): PriorityScore[] {
+  score(entries: CuratedKnowledgeEntry[]): PriorityScore[] {
     const now = Date.now();
     const maxUsage = Math.max(...entries.map((e) => e.usageCount), 1);
 
@@ -58,10 +51,7 @@ export class PrioritySystem {
     });
   }
 
-  /**
-   * Get entries that should be evicted (lowest priority).
-   */
-  getEvictionCandidates(entries: KnowledgeEntry[], count: number): string[] {
+  getEvictionCandidates(entries: CuratedKnowledgeEntry[], count: number): string[] {
     const scores = this.score(entries);
     scores.sort((a, b) => a.score - b.score);
     return scores.slice(0, count).map((s) => s.entryId);

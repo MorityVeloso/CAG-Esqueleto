@@ -14,10 +14,10 @@ export class RedisAdapter {
   private client: Redis;
 
   constructor(config: CAGConfig) {
-    if (!config.redis) {
-      throw new Error('Redis configuration is required for RedisAdapter');
+    if (!config.storage.redis) {
+      throw new Error('storage.redis configuration is required for RedisAdapter');
     }
-    this.client = new Redis(config.redis.url);
+    this.client = new Redis(config.storage.redis.url);
   }
 
   async get(key: string): Promise<string | null> {

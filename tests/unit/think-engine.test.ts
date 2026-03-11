@@ -2,68 +2,73 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { ThinkEngine } from '../../src/layers/layer4-think-tool/think-engine.js';
 import { ComplexTaskRegistry } from '../../src/layers/layer4-think-tool/complex-tasks.js';
 import { createTestConfig } from '../../src/core/config.js';
-import type { QueryContext } from '../../src/core/types.js';
+import type { ContextBlock } from '../../src/core/types.js';
 
 describe('ThinkEngine', () => {
   let engine: ThinkEngine;
-  const baseContext: QueryContext = {
-    query: '',
-    conversationHistory: [],
-    activeKnowledge: [],
-    complexity: 'simple',
-  };
+  const emptyContext: ContextBlock[] = [];
 
   beforeEach(() => {
     const config = createTestConfig();
     engine = new ThinkEngine(config);
   });
 
-  it('should activate thinking for complex queries', () => {
-    const result = engine.shouldUseThinking(
+  it('should activate thinking for queries matching trigger patterns', () => {
+    const result = engine.shouldActivate(
       'Calculate the total cost step by step',
-      baseContext,
+      emptyContext,
     );
     expect(result).toBe(true);
   });
 
   it('should not activate thinking for simple queries', () => {
-    const result = engine.shouldUseThinking(
+    const result = engine.shouldActivate(
       'What is your phone number?',
-      baseContext,
+      emptyContext,
     );
     expect(result).toBe(false);
   });
 
-  it('should detect multi-step complexity', () => {
-    const complexity = engine.assessComplexity(
-      'First analyze the data, then create a plan, and finally implement it',
-      baseContext,
+  it('should activate for "analyze" trigger pattern', () => {
+    const result = engine.shouldActivate(
+      'Analyze the sales data from last quarter',
+      emptyContext,
     );
-    expect(complexity).toBe('multi_step');
+    expect(result).toBe(true);
   });
 
-  it('should detect moderate complexity for comparisons', () => {
-    const complexity = engine.assessComplexity(
-      'What is the difference between plan A and plan B?',
-      baseContext,
+  it('should activate for "compare" trigger pattern', () => {
+    const result = engine.shouldActivate(
+      'Compare plan A and plan B',
+      emptyContext,
     );
-    expect(complexity).toBe('moderate');
+    expect(result).toBe(true);
   });
 
-  it('should return simple for short, direct queries', () => {
-    const complexity = engine.assessComplexity('Hello', baseContext);
-    expect(complexity).toBe('simple');
+  it('should activate for very long queries (>500 chars)', () => {
+    const longQuery = 'a'.repeat(501);
+    const result = engine.shouldActivate(longQuery, emptyContext);
+    expect(result).toBe(true);
   });
 
   it('should respect disabled config', () => {
     const config = createTestConfig({
       layers: {
-        ...createTestConfig().layers,
-        thinkTool: { enabled: false, budgetTokens: 10000 },
+        thinkTool: { enabled: false },
       },
     });
     const disabled = new ThinkEngine(config);
-    expect(disabled.shouldUseThinking('Calculate step by step', baseContext)).toBe(false);
+    expect(disabled.shouldActivate('Calculate step by step', emptyContext)).toBe(false);
+  });
+
+  it('should return configured budget tokens', () => {
+    const config = createTestConfig({
+      layers: {
+        thinkTool: { maxBudgetTokens: 20000 },
+      },
+    });
+    const customEngine = new ThinkEngine(config);
+    expect(customEngine.getThinkingBudget()).toBe(20000);
   });
 });
 

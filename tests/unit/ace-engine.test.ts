@@ -3,17 +3,19 @@ import { ACEEngine } from '../../src/layers/layer5-curated-knowledge/ace-engine.
 import { PrioritySystem } from '../../src/layers/layer5-curated-knowledge/priority-system.js';
 import { KnowledgeStore } from '../../src/layers/layer5-curated-knowledge/knowledge-store.js';
 import { createTestConfig } from '../../src/core/config.js';
-import type { KnowledgeEntry } from '../../src/core/types.js';
+import type { CuratedKnowledgeEntry } from '../../src/core/types.js';
 
-function createEntry(overrides: Partial<KnowledgeEntry> = {}): KnowledgeEntry {
+function createEntry(overrides: Partial<CuratedKnowledgeEntry> = {}): CuratedKnowledgeEntry {
   return {
     id: `entry-${Math.random().toString(36).slice(2)}`,
     content: 'Test knowledge content',
+    source: 'user_taught',
     category: 'general',
     priority: 0.5,
     usageCount: 0,
     lastUsedAt: new Date(),
     createdAt: new Date(),
+    tags: [],
     ...overrides,
   };
 }
@@ -102,35 +104,75 @@ describe('ACEEngine', () => {
     ace = new ACEEngine(config);
   });
 
-  it('should add and retrieve relevant knowledge', async () => {
-    await ace.addKnowledge(createEntry({
-      id: 'return-policy',
+  it('should add an entry with auto-generated id and timestamps', async () => {
+    const entry = await ace.addEntry({
       content: 'Our return policy allows 30 day returns',
+      source: 'user_taught',
       category: 'faq',
-    }));
+      priority: 0.8,
+      tags: ['returns', 'policy'],
+    });
 
-    const results = await ace.getRelevantKnowledge('return policy');
+    expect(entry.id).toBeDefined();
+    expect(entry.id.startsWith('ck_')).toBe(true);
+    expect(entry.usageCount).toBe(0);
+    expect(entry.createdAt).toBeInstanceOf(Date);
+  });
+
+  it('should retrieve relevant knowledge by keyword match', async () => {
+    await ace.addEntry({
+      content: 'Our return policy allows 30 day returns',
+      source: 'user_taught',
+      category: 'faq',
+      priority: 0.8,
+      tags: ['returns'],
+    });
+
+    const results = await ace.getRelevant('return policy');
     expect(results).toHaveLength(1);
-    expect(results[0]?.id).toBe('return-policy');
+    expect(results[0]?.content).toContain('return policy');
   });
 
   it('should return empty for unrelated queries', async () => {
-    await ace.addKnowledge(createEntry({
+    await ace.addEntry({
       content: 'Technical documentation about APIs',
+      source: 'auto_extracted',
       category: 'docs',
-    }));
+      priority: 0.5,
+      tags: ['api'],
+    });
 
-    const results = await ace.getRelevantKnowledge('pizza recipe');
+    const results = await ace.getRelevant('pizza recipe');
     expect(results).toHaveLength(0);
   });
 
-  it('should prioritize entries', async () => {
-    await ace.addKnowledge(createEntry({ id: 'a', usageCount: 10 }));
-    await ace.addKnowledge(createEntry({ id: 'b', usageCount: 1 }));
-    await ace.prioritize();
+  it('should decay priorities', async () => {
+    const entry = await ace.addEntry({
+      content: 'Test content for decay',
+      source: 'user_taught',
+      category: 'general',
+      priority: 1.0,
+      tags: [],
+    });
 
-    const a = ace.getStore().get('a');
-    const b = ace.getStore().get('b');
-    expect(a!.priority).toBeGreaterThan(b!.priority);
+    await ace.decayPriorities();
+
+    const stored = ace.getStore().get(entry.id);
+    expect(stored!.priority).toBeLessThan(1.0);
+    expect(stored!.priority).toBeCloseTo(0.95); // decayFactor default = 0.95
+  });
+
+  it('should filter by minimum priority', async () => {
+    // Add entry with priority below minPriority (default 0.1)
+    await ace.addEntry({
+      content: 'Low priority content with keyword match test',
+      source: 'user_taught',
+      category: 'general',
+      priority: 0.05,
+      tags: [],
+    });
+
+    const results = await ace.getRelevant('keyword match test');
+    expect(results).toHaveLength(0);
   });
 });

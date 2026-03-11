@@ -5,22 +5,19 @@
  * usage tracking and optional persistence.
  */
 
-import type { KnowledgeEntry } from '@core/types.js';
+import type { CuratedKnowledgeEntry } from '@core/types.js';
 
 export class KnowledgeStore {
-  private entries: Map<string, KnowledgeEntry> = new Map();
+  private entries: Map<string, CuratedKnowledgeEntry> = new Map();
 
-  add(entry: KnowledgeEntry): void {
+  add(entry: CuratedKnowledgeEntry): void {
     this.entries.set(entry.id, entry);
   }
 
-  get(id: string): KnowledgeEntry | null {
+  get(id: string): CuratedKnowledgeEntry | null {
     return this.entries.get(id) ?? null;
   }
 
-  /**
-   * Mark entry as used (increments counter, updates timestamp).
-   */
   recordUsage(id: string): void {
     const entry = this.entries.get(id);
     if (entry) {
@@ -29,17 +26,11 @@ export class KnowledgeStore {
     }
   }
 
-  /**
-   * Get entries by category.
-   */
-  getByCategory(category: string): KnowledgeEntry[] {
+  getByCategory(category: string): CuratedKnowledgeEntry[] {
     return Array.from(this.entries.values()).filter((e) => e.category === category);
   }
 
-  /**
-   * Get all entries sorted by priority (usage count * recency).
-   */
-  getAll(): KnowledgeEntry[] {
+  getAll(): CuratedKnowledgeEntry[] {
     return Array.from(this.entries.values());
   }
 
@@ -47,9 +38,6 @@ export class KnowledgeStore {
     return this.entries.delete(id);
   }
 
-  /**
-   * Remove entries that haven't been used in `days` days.
-   */
   removeStale(days: number): number {
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     let removed = 0;

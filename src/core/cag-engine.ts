@@ -4,13 +4,14 @@
  * Flow:
  *  1. Check Semantic Cache (L3) for similar queries
  *  2. Build context: Static (L1) + Dynamic (L2) + Curated Knowledge (L5)
- *  3. Optionally wrap with Think Tool (L4) for complex queries
+ *  3. Optionally activate Think Tool (L4) for complex queries
  *  4. Call Anthropic API with assembled context
- *  5. Cache the response (L3) and update analytics
+ *  5. Cache the response (L3) and track analytics
  */
 
 import type {
   CAGConfig,
+  CAGQuery,
   CAGResponse,
   CAGEvent,
   CAGEventHandler,
@@ -19,9 +20,8 @@ import type {
   ISemanticCacheLayer,
   IThinkToolLayer,
   ICuratedKnowledgeLayer,
-  Message,
-  QueryContext,
-  TokenUsage,
+  AssembledContext,
+  ContextBlock,
 } from './types.js';
 
 export class CAGEngine {
@@ -87,83 +87,112 @@ export class CAGEngine {
 
   // ─── Main Query ──────────────────────────────────────────────────────────
 
-  async query(userMessage: string, conversationHistory: Message[] = []): Promise<CAGResponse> {
+  async query(input: string | CAGQuery): Promise<CAGResponse> {
     if (!this.initialized) {
       throw new Error('CAGEngine not initialized. Call initialize() first.');
     }
 
+    const cagQuery: CAGQuery = typeof input === 'string'
+      ? { message: input }
+      : input;
+
     const startTime = Date.now();
     const layersUsed: string[] = [];
+    let cacheCheckMs = 0;
+    let contextAssemblyMs = 0;
 
-    // Step 1: Check semantic cache
-    if (this.semanticCache) {
-      const cached = await this.semanticCache.get(userMessage);
+    // Step 1: Check semantic cache (unless forceRefresh)
+    if (this.semanticCache && this.config.layers.semanticCache.enabled && !cagQuery.forceRefresh) {
+      const cacheStart = Date.now();
+      const cached = await this.semanticCache.get(cagQuery.message);
+      cacheCheckMs = Date.now() - cacheStart;
+
       if (cached) {
-        this.emit({ type: 'cache_hit', query: userMessage, similarity: cached.similarity });
-        layersUsed.push('semantic-cache');
+        this.emit({ type: 'cache_hit', query: cagQuery.message, similarity: 1 });
+        layersUsed.push('semantic_cache');
         return {
-          content: cached.response,
-          layersUsed,
-          tokenUsage: this.emptyTokenUsage(),
+          answer: cached.responseText,
+          context: this.emptyContext(),
           cacheHit: true,
-          thinkingUsed: false,
-          latencyMs: Date.now() - startTime,
-          metadata: { cachedSimilarity: cached.similarity },
+          semanticCacheKey: cached.id,
+          processingTime: { total: Date.now() - startTime, contextAssembly: 0, llmCall: 0, cacheCheck: cacheCheckMs },
+          usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, estimatedCost: 0 },
         };
       }
-      this.emit({ type: 'cache_miss', query: userMessage });
+      this.emit({ type: 'cache_miss', query: cagQuery.message });
     }
 
-    // Step 2: Build context from layers
-    const contextParts: string[] = [];
+    // Step 2: Assemble context from layers
+    const assemblyStart = Date.now();
+    const contextBlocks: ContextBlock[] = [];
 
-    if (this.staticCag) {
-      const systemPrompt = this.staticCag.getSystemPrompt();
-      if (systemPrompt) {
-        contextParts.push(systemPrompt);
-        layersUsed.push('static-cag');
+    if (this.staticCag && this.config.layers.staticCAG.enabled) {
+      const blocks = this.staticCag.getContextBlocks();
+      contextBlocks.push(...blocks);
+      if (blocks.length > 0) layersUsed.push('static');
+    }
+
+    if (this.dynamicCag && this.config.layers.dynamicCAG.enabled) {
+      const snapshot = await this.dynamicCag.getLatestSnapshot();
+      if (snapshot) {
+        contextBlocks.push(snapshot);
+        layersUsed.push('dynamic');
       }
     }
 
-    if (this.curatedKnowledge) {
-      const relevant = await this.curatedKnowledge.getRelevantKnowledge(userMessage, 5);
+    if (this.curatedKnowledge && this.config.layers.curatedKnowledge.enabled) {
+      const relevant = await this.curatedKnowledge.getRelevant(cagQuery.message, 5);
       if (relevant.length > 0) {
-        const knowledgeBlock = relevant.map((k) => k.content).join('\n\n');
-        contextParts.push(`<curated-knowledge>\n${knowledgeBlock}\n</curated-knowledge>`);
-        layersUsed.push('curated-knowledge');
+        const block: ContextBlock = {
+          id: 'curated-knowledge',
+          layer: 'curated',
+          content: relevant.map((k) => k.content).join('\n\n'),
+          tokenCount: 0,
+          cachedAt: new Date(),
+          expiresAt: new Date(Date.now() + 3600_000),
+          metadata: { entryCount: relevant.length },
+        };
+        contextBlocks.push(block);
+        layersUsed.push('curated');
       }
     }
 
-    // Step 3: Determine if thinking is needed
-    const queryContext: QueryContext = {
-      query: userMessage,
-      conversationHistory,
-      activeKnowledge: contextParts,
-      complexity: 'moderate', // TODO: implement complexity detection
-    };
+    contextAssemblyMs = Date.now() - assemblyStart;
 
+    // Step 3: Check if thinking should be activated
     let useThinking = false;
     if (this.thinkTool && this.config.layers.thinkTool.enabled) {
-      useThinking = this.thinkTool.shouldUseThinking(userMessage, queryContext);
+      useThinking = this.thinkTool.shouldActivate(cagQuery.message, contextBlocks);
       if (useThinking) {
-        this.emit({ type: 'thinking_activated', query: userMessage });
-        layersUsed.push('think-tool');
+        this.emit({
+          type: 'thinking_activated',
+          query: cagQuery.message,
+          budgetTokens: this.thinkTool.getThinkingBudget(),
+        });
+        layersUsed.push('think');
       }
     }
 
     // Step 4: Call Anthropic API
-    // TODO: Implement actual API call via AnthropicAdapter
-    const response = await this.callModel(userMessage, contextParts, conversationHistory, useThinking);
+    const llmStart = Date.now();
+    const response = await this.callModel(cagQuery, contextBlocks, useThinking);
+    const llmMs = Date.now() - llmStart;
 
     // Step 5: Cache the response
-    if (this.semanticCache && response.content) {
-      await this.semanticCache.set(userMessage, response.content);
+    if (this.semanticCache && this.config.layers.semanticCache.enabled && response.answer) {
+      await this.semanticCache.set(cagQuery.message, response.answer);
     }
 
     return {
       ...response,
-      layersUsed,
-      latencyMs: Date.now() - startTime,
+      context: this.assembleContext(contextBlocks),
+      cacheHit: false,
+      processingTime: {
+        total: Date.now() - startTime,
+        contextAssembly: contextAssemblyMs,
+        llmCall: llmMs,
+        cacheCheck: cacheCheckMs,
+      },
     };
   }
 
@@ -195,24 +224,28 @@ export class CAGEngine {
     ].filter((l): l is NonNullable<typeof l> => l !== null);
   }
 
-  private async callModel(
-    _userMessage: string,
-    _contextParts: string[],
-    _history: Message[],
-    _useThinking: boolean,
-  ): Promise<CAGResponse> {
-    // Placeholder — will be implemented in Prompt 1 (Anthropic Adapter)
-    throw new Error('AnthropicAdapter not yet connected. Implement in next phase.');
+  private assembleContext(blocks: ContextBlock[]): AssembledContext {
+    const totalTokens = blocks.reduce((sum, b) => sum + b.tokenCount, 0);
+    return {
+      blocks,
+      totalTokens,
+      cachedTokens: 0,
+      freshTokens: totalTokens,
+      costEstimate: { cachedInputCost: 0, freshInputCost: 0, totalEstimatedCost: 0 },
+      layerStats: blocks.map((b) => ({ layer: b.layer, tokens: b.tokenCount })),
+    };
   }
 
-  private emptyTokenUsage(): TokenUsage {
-    return {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheCreationTokens: 0,
-      thinkingTokens: 0,
-      totalCost: 0,
-    };
+  private emptyContext(): AssembledContext {
+    return { blocks: [], totalTokens: 0, cachedTokens: 0, freshTokens: 0, costEstimate: { cachedInputCost: 0, freshInputCost: 0, totalEstimatedCost: 0 }, layerStats: [] };
+  }
+
+  private async callModel(
+    _query: CAGQuery,
+    _context: ContextBlock[],
+    _useThinking: boolean,
+  ): Promise<CAGResponse> {
+    // Placeholder — implemented in next phase with AnthropicAdapter
+    throw new Error('AnthropicAdapter not yet connected. Implement in next phase.');
   }
 }

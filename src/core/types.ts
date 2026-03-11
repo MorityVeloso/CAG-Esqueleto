@@ -1,68 +1,238 @@
 /**
- * CAG-Esqueleto — Shared TypeScript types for the 5-Layer Context Engineering Module
+ * CAG-Esqueleto — Complete type system for the 5-Layer Context Engineering Module
  */
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 export interface CAGConfig {
-  /** Anthropic API key */
-  anthropicApiKey: string;
-  /** Claude model to use */
-  model: string;
-  /** Maximum tokens for generation */
-  maxTokens: number;
-
-  /** Supabase configuration (optional — for persistent storage) */
-  supabase?: {
-    url: string;
-    serviceKey: string;
+  anthropic: {
+    apiKey: string;
+    /** @default 'claude-sonnet-4-20250514' */
+    model: string;
+    /** @default 8192 */
+    maxTokens: number;
+    /** @default 0.3 */
+    temperature: number;
   };
-
-  /** Redis configuration (optional — for caching) */
-  redis?: {
-    url: string;
+  storage: {
+    /** 'memory' for tests, 'supabase' or 'redis' for production */
+    type: 'supabase' | 'redis' | 'memory';
+    supabase?: { url: string; serviceKey: string };
+    redis?: { url: string };
   };
-
-  /** Layer-specific settings */
   layers: LayerConfig;
-
-  /** Logging level */
-  logLevel: LogLevel;
+  logging: LoggingConfig;
 }
 
 export interface LayerConfig {
-  staticCag: {
-    /** TTL for static cache in seconds */
+  staticCAG: {
+    enabled: boolean;
+    /** TTL in seconds @default 3600 */
     ttl: number;
-    /** Whether to use Anthropic Prompt Caching */
-    usePromptCaching: boolean;
+    /** Max tokens for static cache @default 50000 */
+    maxTokens: number;
+    /** Static knowledge sources */
+    sources: StaticSource[];
   };
-  dynamicCag: {
-    /** TTL for dynamic snapshots in seconds */
+  dynamicCAG: {
+    enabled: boolean;
+    /** TTL in seconds @default 1800 */
     ttl: number;
-    /** Maximum compressed size in tokens */
-    maxCompressedTokens: number;
-    /** Update interval in seconds */
+    /** Max compressed tokens @default 15000 */
+    maxTokens: number;
+    /** Target compression ratio @default 0.45 */
+    compressionRatio: number;
+    /** Update interval in minutes @default 60 */
     updateInterval: number;
+    /** Function that generates a fresh snapshot */
+    snapshotFn?: () => Promise<string>;
   };
   semanticCache: {
-    /** Cosine similarity threshold (0-1) for cache hits */
+    enabled: boolean;
+    /** TTL in seconds @default 7200 */
+    ttl: number;
+    /** Cosine similarity threshold 0-1 @default 0.85 */
     similarityThreshold: number;
-    /** Maximum number of cached entries */
+    /** Max cached entries @default 1000 */
     maxEntries: number;
+    /** Embedding model @default 'voyage-3-large' */
+    embeddingModel: string;
   };
   thinkTool: {
-    /** Whether to enable extended thinking */
     enabled: boolean;
-    /** Budget tokens for thinking */
-    budgetTokens: number;
+    /** Regex patterns that trigger extended thinking */
+    triggerPatterns: string[];
+    /** Max budget tokens for thinking @default 10000 */
+    maxBudgetTokens: number;
   };
   curatedKnowledge: {
-    /** Whether to enable auto-prioritization */
-    autoPrioritize: boolean;
-    /** Maximum knowledge entries */
+    enabled: boolean;
+    /** Max knowledge entries @default 500 */
     maxEntries: number;
+    /** Priority decay factor per cycle @default 0.95 */
+    decayFactor: number;
+    /** Minimum priority to include in context @default 0.1 */
+    minPriority: number;
   };
+}
+
+export interface LoggingConfig {
+  level: LogLevel;
+  destination: 'console' | 'file' | 'custom';
+  customFn?: (entry: LogEntry) => void;
+}
+
+// ─── Sources ─────────────────────────────────────────────────────────────────
+
+export interface StaticSource {
+  id: string;
+  name: string;
+  type: 'text' | 'file' | 'function';
+  /** Content string (for type='text') */
+  content?: string;
+  /** File path (for type='file') */
+  filePath?: string;
+  /** Async loader (for type='function') */
+  loadFn?: () => Promise<string>;
+  /** Category: 'business_rules', 'formulas', 'parameters', etc. */
+  category: string;
+  /** Priority 1-10, higher = more important */
+  priority: number;
+}
+
+// ─── Context ─────────────────────────────────────────────────────────────────
+
+export type ContextLayerName = 'static' | 'dynamic' | 'semantic_cache' | 'think' | 'curated';
+
+export interface ContextBlock {
+  id: string;
+  layer: ContextLayerName;
+  content: string;
+  tokenCount: number;
+  cachedAt: Date;
+  expiresAt: Date;
+  metadata: Record<string, unknown>;
+}
+
+export interface AssembledContext {
+  blocks: ContextBlock[];
+  totalTokens: number;
+  cachedTokens: number;
+  freshTokens: number;
+  costEstimate: {
+    cachedInputCost: number;
+    freshInputCost: number;
+    totalEstimatedCost: number;
+  };
+  layerStats: LayerStat[];
+}
+
+export interface LayerStat {
+  layer: string;
+  tokens: number;
+  hitRate?: number;
+  latencyMs?: number;
+}
+
+// ─── Query & Response ────────────────────────────────────────────────────────
+
+export interface CAGQuery {
+  message: string;
+  userId?: string;
+  sessionId?: string;
+  conversationHistory?: Message[];
+  metadata?: Record<string, unknown>;
+  /** Bypass all caches */
+  forceRefresh?: boolean;
+  /** Override layer config per-query */
+  layerOverrides?: DeepPartial<LayerConfig>;
+}
+
+export interface CAGResponse {
+  answer: string;
+  context: AssembledContext;
+  /** Present if Think Tool was used */
+  thinkingProcess?: string;
+  cacheHit: boolean;
+  semanticCacheKey?: string;
+  processingTime: {
+    total: number;
+    contextAssembly: number;
+    llmCall: number;
+    cacheCheck: number;
+  };
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens: number;
+    estimatedCost: number;
+  };
+}
+
+// ─── Messages ────────────────────────────────────────────────────────────────
+
+export interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp?: Date;
+}
+
+// ─── Semantic Cache ──────────────────────────────────────────────────────────
+
+export interface SemanticCacheEntry {
+  id: string;
+  queryEmbedding: number[];
+  queryText: string;
+  responseText: string;
+  hitCount: number;
+  createdAt: Date;
+  expiresAt: Date;
+  metadata: Record<string, unknown>;
+}
+
+// ─── Curated Knowledge ───────────────────────────────────────────────────────
+
+export type KnowledgeSource = 'user_taught' | 'auto_extracted' | 'feedback_loop';
+
+export interface CuratedKnowledgeEntry {
+  id: string;
+  content: string;
+  source: KnowledgeSource;
+  category: string;
+  /** Auto-adjusted priority 0.0 to 1.0 */
+  priority: number;
+  usageCount: number;
+  lastUsedAt: Date;
+  createdAt: Date;
+  createdBy?: string;
+  tags: string[];
+}
+
+// ─── Analytics ───────────────────────────────────────────────────────────────
+
+export interface UsageAnalytics {
+  queryId: string;
+  timestamp: Date;
+  layersUsed: string[];
+  cacheHit: boolean;
+  processingTimeMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  estimatedCostUSD: number;
+  userId?: string;
+}
+
+// ─── Logging ─────────────────────────────────────────────────────────────────
+
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+export interface LogEntry {
+  timestamp: Date;
+  level: LogLevel;
+  layer?: string;
+  message: string;
+  data?: Record<string, unknown>;
 }
 
 // ─── Layer Interfaces ────────────────────────────────────────────────────────
@@ -75,21 +245,21 @@ export interface ILayer {
 }
 
 export interface IStaticCagLayer extends ILayer {
-  loadKnowledge(sources: KnowledgeSource[]): Promise<void>;
+  loadSources(sources: StaticSource[]): Promise<void>;
   getSystemPrompt(): string;
-  getCacheBreakpoints(): CacheBreakpoint[];
+  getContextBlocks(): ContextBlock[];
   invalidate(): void;
 }
 
 export interface IDynamicCagLayer extends ILayer {
-  createSnapshot(data: DynamicData): Promise<CompressedSnapshot>;
-  getLatestSnapshot(key: string): Promise<CompressedSnapshot | null>;
-  scheduleUpdate(key: string, fetcher: DataFetcher, intervalMs: number): void;
-  cancelUpdate(key: string): void;
+  createSnapshot(content: string, key?: string): Promise<ContextBlock>;
+  getLatestSnapshot(key?: string): Promise<ContextBlock | null>;
+  scheduleUpdates(): void;
+  cancelUpdates(): void;
 }
 
 export interface ISemanticCacheLayer extends ILayer {
-  get(query: string): Promise<CacheEntry | null>;
+  get(query: string): Promise<SemanticCacheEntry | null>;
   set(query: string, response: string, metadata?: Record<string, unknown>): Promise<void>;
   invalidate(query: string): Promise<void>;
   clear(): Promise<void>;
@@ -97,36 +267,24 @@ export interface ISemanticCacheLayer extends ILayer {
 }
 
 export interface IThinkToolLayer extends ILayer {
-  shouldUseThinking(query: string, context: QueryContext): boolean;
-  wrapWithThinking(messages: Message[]): Message[];
+  shouldActivate(query: string, context: ContextBlock[]): boolean;
+  getThinkingBudget(): number;
 }
 
 export interface ICuratedKnowledgeLayer extends ILayer {
-  addKnowledge(entry: KnowledgeEntry): Promise<void>;
-  getRelevantKnowledge(query: string, limit?: number): Promise<KnowledgeEntry[]>;
-  prioritize(): Promise<void>;
+  addEntry(entry: Omit<CuratedKnowledgeEntry, 'id' | 'usageCount' | 'lastUsedAt' | 'createdAt'>): Promise<CuratedKnowledgeEntry>;
+  getRelevant(query: string, limit?: number): Promise<CuratedKnowledgeEntry[]>;
+  decayPriorities(): Promise<void>;
   removeStale(): Promise<number>;
 }
 
-// ─── Domain Types ────────────────────────────────────────────────────────────
+// ─── Supporting Types ────────────────────────────────────────────────────────
 
-export interface KnowledgeSource {
-  id: string;
-  type: 'text' | 'markdown' | 'json' | 'url';
-  content: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface CacheBreakpoint {
-  type: 'ephemeral';
-  position: number;
-}
-
-export interface DynamicData {
-  key: string;
-  content: string;
-  source: string;
-  fetchedAt: Date;
+export interface CacheStats {
+  totalEntries: number;
+  hitRate: number;
+  avgSimilarity: number;
+  tokensSaved: number;
 }
 
 export interface CompressedSnapshot {
@@ -139,81 +297,6 @@ export interface CompressedSnapshot {
   expiresAt: Date;
 }
 
-export type DataFetcher = () => Promise<string>;
-
-export interface CacheEntry {
-  query: string;
-  response: string;
-  embedding: number[];
-  similarity: number;
-  hitCount: number;
-  createdAt: Date;
-  lastAccessedAt: Date;
-  metadata?: Record<string, unknown>;
-}
-
-export interface CacheStats {
-  totalEntries: number;
-  hitRate: number;
-  avgSimilarity: number;
-  tokensSaved: number;
-}
-
-export interface KnowledgeEntry {
-  id: string;
-  content: string;
-  category: string;
-  priority: number;
-  embedding?: number[];
-  usageCount: number;
-  lastUsedAt: Date;
-  createdAt: Date;
-  metadata?: Record<string, unknown>;
-}
-
-export interface QueryContext {
-  query: string;
-  conversationHistory: Message[];
-  activeKnowledge: string[];
-  complexity: QueryComplexity;
-}
-
-export type QueryComplexity = 'simple' | 'moderate' | 'complex' | 'multi_step';
-
-export interface Message {
-  role: 'user' | 'assistant' | 'system';
-  content: string | MessageContent[];
-}
-
-export interface MessageContent {
-  type: 'text' | 'tool_use' | 'tool_result' | 'thinking';
-  text?: string;
-  [key: string]: unknown;
-}
-
-// ─── Engine Types ────────────────────────────────────────────────────────────
-
-export interface CAGResponse {
-  content: string;
-  layersUsed: string[];
-  tokenUsage: TokenUsage;
-  cacheHit: boolean;
-  thinkingUsed: boolean;
-  latencyMs: number;
-  metadata: Record<string, unknown>;
-}
-
-export interface TokenUsage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheCreationTokens: number;
-  thinkingTokens: number;
-  totalCost: number;
-}
-
-export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'silent';
-
 // ─── Events ──────────────────────────────────────────────────────────────────
 
 export type CAGEvent =
@@ -221,7 +304,19 @@ export type CAGEvent =
   | { type: 'cache_miss'; query: string }
   | { type: 'snapshot_updated'; key: string }
   | { type: 'knowledge_added'; id: string; category: string }
-  | { type: 'thinking_activated'; query: string }
-  | { type: 'layer_error'; layer: string; error: Error };
+  | { type: 'thinking_activated'; query: string; budgetTokens: number }
+  | { type: 'layer_error'; layer: string; error: Error }
+  | { type: 'query_complete'; queryId: string; analytics: UsageAnalytics };
 
 export type CAGEventHandler = (event: CAGEvent) => void;
+
+// ─── Utility Types ───────────────────────────────────────────────────────────
+
+/** Recursively makes all properties optional */
+export type DeepPartial<T> = {
+  [P in keyof T]?: T[P] extends (infer U)[]
+    ? DeepPartial<U>[]
+    : T[P] extends object
+      ? DeepPartial<T[P]>
+      : T[P];
+};

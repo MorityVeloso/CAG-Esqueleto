@@ -2,7 +2,7 @@
  * Logger — Simple structured logging for CAG-Esqueleto
  *
  * Respects log level from config.
- * Outputs JSON in production, readable format in dev.
+ * Outputs JSON for structured log consumption.
  */
 
 import type { LogLevel } from '@core/types.js';
@@ -12,7 +12,6 @@ const LOG_LEVELS: Record<LogLevel, number> = {
   info: 1,
   warn: 2,
   error: 3,
-  silent: 4,
 };
 
 export class Logger {

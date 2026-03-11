@@ -4,12 +4,18 @@
  * Wraps @anthropic-ai/sdk to provide:
  *  - Message creation with prompt caching support
  *  - Extended thinking (Think Tool)
- *  - Embedding generation (for semantic cache)
  *  - Token counting
  */
 
 import Anthropic from '@anthropic-ai/sdk';
-import type { CAGConfig, Message, TokenUsage, CacheBreakpoint } from '@core/types.js';
+import type { CAGConfig, Message, ContextBlock } from '@core/types.js';
+
+export interface AnthropicUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  estimatedCost: number;
+}
 
 export class AnthropicAdapter {
   private client: Anthropic;
@@ -17,43 +23,37 @@ export class AnthropicAdapter {
 
   constructor(config: CAGConfig) {
     this.config = config;
-    this.client = new Anthropic({ apiKey: config.anthropicApiKey });
+    this.client = new Anthropic({ apiKey: config.anthropic.apiKey });
   }
 
-  /**
-   * Send a message to Claude with optional prompt caching and thinking.
-   */
   async createMessage(params: {
     systemPrompt: string;
     messages: Message[];
-    cacheBreakpoints?: CacheBreakpoint[];
+    contextBlocks?: ContextBlock[];
     useThinking?: boolean;
     thinkingBudget?: number;
-  }): Promise<{ content: string; usage: TokenUsage }> {
-    const { systemPrompt, messages, cacheBreakpoints = [], useThinking = false, thinkingBudget } = params;
+  }): Promise<{ content: string; thinkingProcess?: string; usage: AnthropicUsage }> {
+    const { systemPrompt, messages, useThinking = false, thinkingBudget } = params;
 
     // Build system with cache control
     const system: Anthropic.Messages.TextBlockParam[] = [{
       type: 'text' as const,
       text: systemPrompt,
-      ...(cacheBreakpoints.length > 0 ? { cache_control: { type: 'ephemeral' as const } } : {}),
+      ...(systemPrompt.length > 1000 ? { cache_control: { type: 'ephemeral' as const } } : {}),
     }];
 
-    // Build messages
     const apiMessages: Anthropic.Messages.MessageParam[] = messages.map((m) => ({
-      role: m.role as 'user' | 'assistant',
-      content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+      role: m.role,
+      content: m.content,
     }));
 
-    // Build request params
     const requestParams: Anthropic.Messages.MessageCreateParams = {
-      model: this.config.model,
-      max_tokens: this.config.maxTokens,
+      model: this.config.anthropic.model,
+      max_tokens: this.config.anthropic.maxTokens,
       system,
       messages: apiMessages,
     };
 
-    // Add thinking if enabled
     if (useThinking && thinkingBudget) {
       requestParams.thinking = {
         type: 'enabled',
@@ -63,27 +63,30 @@ export class AnthropicAdapter {
 
     const response = await this.client.messages.create(requestParams);
 
-    // Extract text content
     const textBlocks = response.content.filter(
       (block): block is Anthropic.Messages.TextBlock => block.type === 'text',
     );
     const content = textBlocks.map((b) => b.text).join('');
 
-    const usage: TokenUsage = {
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      cacheReadTokens: (response.usage as Record<string, number>)['cache_read_input_tokens'] ?? 0,
-      cacheCreationTokens: (response.usage as Record<string, number>)['cache_creation_input_tokens'] ?? 0,
-      thinkingTokens: 0, // TODO: extract from thinking blocks
-      totalCost: 0, // TODO: calculate based on model pricing
+    // Extract thinking if present
+    const thinkingBlocks = response.content.filter(
+      (block) => block.type === 'thinking',
+    );
+    const thinkingProcess = thinkingBlocks.length > 0
+      ? thinkingBlocks.map((b) => (b as { thinking: string }).thinking).join('\n')
+      : undefined;
+
+    const rawUsage = response.usage as Record<string, number>;
+    const usage: AnthropicUsage = {
+      inputTokens: rawUsage['input_tokens'] ?? 0,
+      outputTokens: rawUsage['output_tokens'] ?? 0,
+      cachedInputTokens: rawUsage['cache_read_input_tokens'] ?? 0,
+      estimatedCost: 0,
     };
 
-    return { content, usage };
+    return { content, thinkingProcess, usage };
   }
 
-  /**
-   * Get the underlying Anthropic client for advanced use cases.
-   */
   getClient(): Anthropic {
     return this.client;
   }

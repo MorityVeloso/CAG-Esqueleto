@@ -4,13 +4,11 @@
  * Caches query-response pairs and retrieves them based on semantic similarity.
  * If a new query is semantically similar to a cached one (above threshold),
  * the cached response is returned — saving an entire API call.
- *
- * This is the biggest cost/latency saver in the CAG architecture.
  */
 
 import type {
   ISemanticCacheLayer,
-  CacheEntry,
+  SemanticCacheEntry,
   CacheStats,
   CAGConfig,
 } from '@core/types.js';
@@ -22,23 +20,19 @@ export class SemanticCache implements ISemanticCacheLayer {
 
   private readonly config: CAGConfig;
   private readonly store = new EmbeddingStore();
-  private responses: Map<string, CacheEntry> = new Map();
+  private responses: Map<string, SemanticCacheEntry> = new Map();
 
   private hits = 0;
   private misses = 0;
   private totalTokensSaved = 0;
 
-  /** Embedding function — must be injected (Anthropic voyager-3, OpenAI, etc.) */
+  /** Embedding function — must be injected */
   private embedFn: ((text: string) => Promise<number[]>) | null = null;
 
   constructor(config: CAGConfig) {
     this.config = config;
   }
 
-  /**
-   * Inject the embedding function.
-   * This keeps the cache adapter-agnostic.
-   */
   setEmbeddingFunction(fn: (text: string) => Promise<number[]>): void {
     this.embedFn = fn;
   }
@@ -54,10 +48,7 @@ export class SemanticCache implements ISemanticCacheLayer {
     this.responses.clear();
   }
 
-  /**
-   * Try to find a cached response for the query.
-   */
-  async get(query: string): Promise<CacheEntry | null> {
+  async get(query: string): Promise<SemanticCacheEntry | null> {
     if (!this.embedFn) return null;
 
     const queryEmbedding = await this.embedFn(query);
@@ -77,17 +68,20 @@ export class SemanticCache implements ISemanticCacheLayer {
       return null;
     }
 
+    // Check TTL
+    if (new Date() > entry.expiresAt) {
+      this.store.remove(best.entry.id);
+      this.responses.delete(best.entry.id);
+      this.misses++;
+      return null;
+    }
+
     this.hits++;
     entry.hitCount++;
-    entry.lastAccessedAt = new Date();
-    entry.similarity = best.similarity;
 
     return entry;
   }
 
-  /**
-   * Cache a query-response pair.
-   */
   async set(query: string, response: string, metadata?: Record<string, unknown>): Promise<void> {
     if (!this.embedFn) return;
 
@@ -95,15 +89,17 @@ export class SemanticCache implements ISemanticCacheLayer {
     const id = this.generateId(query);
 
     this.store.add(id, query, embedding);
+
+    const ttlMs = this.config.layers.semanticCache.ttl * 1000;
     this.responses.set(id, {
-      query,
-      response,
-      embedding,
-      similarity: 1,
+      id,
+      queryEmbedding: embedding,
+      queryText: query,
+      responseText: response,
       hitCount: 0,
       createdAt: new Date(),
-      lastAccessedAt: new Date(),
-      metadata,
+      expiresAt: new Date(Date.now() + ttlMs),
+      metadata: metadata ?? {},
     });
 
     // Evict oldest if over limit
@@ -131,13 +127,12 @@ export class SemanticCache implements ISemanticCacheLayer {
     return {
       totalEntries: this.responses.size,
       hitRate: total > 0 ? this.hits / total : 0,
-      avgSimilarity: 0, // TODO: track running average
+      avgSimilarity: 0,
       tokensSaved: this.totalTokensSaved,
     };
   }
 
   private generateId(query: string): string {
-    // Simple hash — deterministic for same input
     let hash = 0;
     for (let i = 0; i < query.length; i++) {
       const char = query.charCodeAt(i);
@@ -151,8 +146,8 @@ export class SemanticCache implements ISemanticCacheLayer {
     let oldestDate = new Date();
 
     for (const [key, entry] of this.responses) {
-      if (entry.lastAccessedAt < oldestDate) {
-        oldestDate = entry.lastAccessedAt;
+      if (entry.createdAt < oldestDate) {
+        oldestDate = entry.createdAt;
         oldestKey = key;
       }
     }

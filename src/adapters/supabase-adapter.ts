@@ -9,29 +9,30 @@
  */
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import type { CAGConfig, CacheEntry, KnowledgeEntry, CompressedSnapshot } from '@core/types.js';
+import type { CAGConfig, SemanticCacheEntry, CuratedKnowledgeEntry, CompressedSnapshot } from '@core/types.js';
 
 export class SupabaseAdapter {
   private client: SupabaseClient;
 
   constructor(config: CAGConfig) {
-    if (!config.supabase) {
-      throw new Error('Supabase configuration is required for SupabaseAdapter');
+    if (!config.storage.supabase) {
+      throw new Error('storage.supabase configuration is required for SupabaseAdapter');
     }
-    this.client = createClient(config.supabase.url, config.supabase.serviceKey);
+    this.client = createClient(config.storage.supabase.url, config.storage.supabase.serviceKey);
   }
 
   // ─── Semantic Cache ────────────────────────────────────────────────────
 
-  async saveCacheEntry(entry: CacheEntry): Promise<void> {
+  async saveCacheEntry(entry: SemanticCacheEntry): Promise<void> {
     const { error } = await this.client.from('cag_semantic_cache').upsert({
-      query: entry.query,
-      response: entry.response,
-      embedding: entry.embedding,
+      id: entry.id,
+      query: entry.queryText,
+      response: entry.responseText,
+      embedding: entry.queryEmbedding,
       hit_count: entry.hitCount,
-      metadata: entry.metadata ?? {},
+      metadata: entry.metadata,
       created_at: entry.createdAt.toISOString(),
-      last_accessed_at: entry.lastAccessedAt.toISOString(),
+      expires_at: entry.expiresAt.toISOString(),
     });
     if (error) throw error;
   }
@@ -40,34 +41,35 @@ export class SupabaseAdapter {
     embedding: number[],
     threshold: number,
     limit: number,
-  ): Promise<CacheEntry[]> {
+  ): Promise<SemanticCacheEntry[]> {
     const { data, error } = await this.client.rpc('match_semantic_cache', {
       query_embedding: embedding,
       similarity_threshold: threshold,
       match_count: limit,
     });
     if (error) throw error;
-    return (data ?? []) as unknown as CacheEntry[];
+    return (data ?? []) as unknown as SemanticCacheEntry[];
   }
 
   // ─── Knowledge ─────────────────────────────────────────────────────────
 
-  async saveKnowledge(entry: KnowledgeEntry): Promise<void> {
+  async saveKnowledge(entry: CuratedKnowledgeEntry): Promise<void> {
     const { error } = await this.client.from('cag_curated_knowledge').upsert({
       id: entry.id,
       content: entry.content,
+      source: entry.source,
       category: entry.category,
       priority: entry.priority,
-      embedding: entry.embedding,
       usage_count: entry.usageCount,
-      metadata: entry.metadata ?? {},
+      tags: entry.tags,
+      created_by: entry.createdBy,
       last_used_at: entry.lastUsedAt.toISOString(),
       created_at: entry.createdAt.toISOString(),
     });
     if (error) throw error;
   }
 
-  async loadAllKnowledge(): Promise<KnowledgeEntry[]> {
+  async loadAllKnowledge(): Promise<CuratedKnowledgeEntry[]> {
     const { data, error } = await this.client
       .from('cag_curated_knowledge')
       .select('*')
@@ -116,17 +118,18 @@ export class SupabaseAdapter {
     return this.client;
   }
 
-  private mapKnowledgeRow(row: Record<string, unknown>): KnowledgeEntry {
+  private mapKnowledgeRow(row: Record<string, unknown>): CuratedKnowledgeEntry {
     return {
       id: row['id'] as string,
       content: row['content'] as string,
+      source: row['source'] as CuratedKnowledgeEntry['source'],
       category: row['category'] as string,
       priority: row['priority'] as number,
-      embedding: row['embedding'] as number[] | undefined,
       usageCount: row['usage_count'] as number,
       lastUsedAt: new Date(row['last_used_at'] as string),
       createdAt: new Date(row['created_at'] as string),
-      metadata: row['metadata'] as Record<string, unknown> | undefined,
+      createdBy: row['created_by'] as string | undefined,
+      tags: (row['tags'] as string[]) ?? [],
     };
   }
 }

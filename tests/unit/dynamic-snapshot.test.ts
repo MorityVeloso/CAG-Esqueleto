@@ -42,34 +42,40 @@ describe('DynamicSnapshot', () => {
     snapshot = new DynamicSnapshot(config);
   });
 
-  it('should create a compressed snapshot', async () => {
-    const result = await snapshot.createSnapshot({
-      key: 'prices',
-      content: 'Product A: $10. Product B: $20. Product C: $30.',
-      source: 'api',
-      fetchedAt: new Date(),
-    });
+  it('should create a compressed snapshot returning a ContextBlock', async () => {
+    const result = await snapshot.createSnapshot(
+      'Product A: $10. Product B: $20. Product C: $30.',
+      'prices',
+    );
 
-    expect(result.key).toBe('prices');
-    expect(result.compressed.length).toBeGreaterThan(0);
+    expect(result.id).toBe('dynamic-prices');
+    expect(result.layer).toBe('dynamic');
+    expect(result.content.length).toBeGreaterThan(0);
     expect(result.expiresAt.getTime()).toBeGreaterThan(Date.now());
   });
 
   it('should retrieve a stored snapshot', async () => {
-    await snapshot.createSnapshot({
-      key: 'inventory',
-      content: 'Item 1: 50 units. Item 2: 100 units.',
-      source: 'db',
-      fetchedAt: new Date(),
-    });
+    await snapshot.createSnapshot(
+      'Item 1: 50 units. Item 2: 100 units.',
+      'inventory',
+    );
 
     const result = await snapshot.getLatestSnapshot('inventory');
     expect(result).not.toBeNull();
-    expect(result?.key).toBe('inventory');
+    expect(result?.id).toBe('dynamic-inventory');
+    expect(result?.layer).toBe('dynamic');
   });
 
   it('should return null for non-existent key', async () => {
     const result = await snapshot.getLatestSnapshot('nonexistent');
     expect(result).toBeNull();
+  });
+
+  it('should use "default" key when not specified', async () => {
+    await snapshot.createSnapshot('Some content');
+
+    const result = await snapshot.getLatestSnapshot();
+    expect(result).not.toBeNull();
+    expect(result?.id).toBe('dynamic-default');
   });
 });

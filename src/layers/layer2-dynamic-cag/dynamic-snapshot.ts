@@ -3,16 +3,13 @@
  *
  * Manages compressed snapshots of frequently-changing data.
  * Unlike static cache (L1), this data has a short TTL and
- * is periodically refreshed.
- *
- * Use case: product prices, inventory, live status, external API data.
+ * is periodically refreshed via snapshotFn.
  */
 
 import type {
   IDynamicCagLayer,
-  DynamicData,
+  ContextBlock,
   CompressedSnapshot,
-  DataFetcher,
   CAGConfig,
 } from '@core/types.js';
 import { Compressor } from './compressor.js';
@@ -32,7 +29,6 @@ export class DynamicSnapshot implements IDynamicCagLayer {
   }
 
   async initialize(): Promise<void> {
-    // Clean expired snapshots on init
     this.cleanExpired();
   }
 
@@ -41,17 +37,14 @@ export class DynamicSnapshot implements IDynamicCagLayer {
     this.snapshots.clear();
   }
 
-  /**
-   * Create a compressed snapshot from dynamic data.
-   */
-  async createSnapshot(data: DynamicData): Promise<CompressedSnapshot> {
-    const maxTokens = this.config.layers.dynamicCag.maxCompressedTokens;
-    const result = this.compressor.extractive(data.content, maxTokens);
+  async createSnapshot(content: string, key = 'default'): Promise<ContextBlock> {
+    const maxTokens = this.config.layers.dynamicCAG.maxTokens;
+    const result = this.compressor.extractive(content, maxTokens);
 
-    const ttlMs = this.config.layers.dynamicCag.ttl * 1000;
+    const ttlMs = this.config.layers.dynamicCAG.ttl * 1000;
     const snapshot: CompressedSnapshot = {
-      key: data.key,
-      original: data.content,
+      key,
+      original: content,
       compressed: result.compressed,
       compressionRatio: result.ratio,
       tokenCount: result.compressedTokens,
@@ -59,14 +52,20 @@ export class DynamicSnapshot implements IDynamicCagLayer {
       expiresAt: new Date(Date.now() + ttlMs),
     };
 
-    this.snapshots.set(data.key, snapshot);
-    return snapshot;
+    this.snapshots.set(key, snapshot);
+
+    return {
+      id: `dynamic-${key}`,
+      layer: 'dynamic',
+      content: snapshot.compressed,
+      tokenCount: snapshot.tokenCount,
+      cachedAt: snapshot.createdAt,
+      expiresAt: snapshot.expiresAt,
+      metadata: { compressionRatio: snapshot.compressionRatio, key },
+    };
   }
 
-  /**
-   * Get the latest non-expired snapshot for a key.
-   */
-  async getLatestSnapshot(key: string): Promise<CompressedSnapshot | null> {
+  async getLatestSnapshot(key = 'default'): Promise<ContextBlock | null> {
     const snapshot = this.snapshots.get(key);
     if (!snapshot) return null;
 
@@ -75,20 +74,29 @@ export class DynamicSnapshot implements IDynamicCagLayer {
       return null;
     }
 
-    return snapshot;
+    return {
+      id: `dynamic-${key}`,
+      layer: 'dynamic',
+      content: snapshot.compressed,
+      tokenCount: snapshot.tokenCount,
+      cachedAt: snapshot.createdAt,
+      expiresAt: snapshot.expiresAt,
+      metadata: { compressionRatio: snapshot.compressionRatio, key },
+    };
   }
 
-  /**
-   * Schedule automatic updates for a data source.
-   */
-  scheduleUpdate(key: string, fetcher: DataFetcher, intervalMs: number): void {
-    this.scheduler.schedule(key, fetcher, intervalMs, (k, data) => {
-      void this.createSnapshot({ key: k, content: data, source: 'scheduled', fetchedAt: new Date() });
+  scheduleUpdates(): void {
+    const snapshotFn = this.config.layers.dynamicCAG.snapshotFn;
+    if (!snapshotFn) return;
+
+    const intervalMs = this.config.layers.dynamicCAG.updateInterval * 60 * 1000;
+    this.scheduler.schedule('default', snapshotFn, intervalMs, (_key, data) => {
+      void this.createSnapshot(data);
     });
   }
 
-  cancelUpdate(key: string): void {
-    this.scheduler.cancel(key);
+  cancelUpdates(): void {
+    this.scheduler.cancelAll();
   }
 
   private cleanExpired(): void {
