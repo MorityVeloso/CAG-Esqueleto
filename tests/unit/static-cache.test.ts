@@ -15,6 +15,14 @@ function createSource(overrides: Partial<StaticSource> & { id: string }): Static
   };
 }
 
+/** Generate long text to exceed 1024 token minimum for cache blocks */
+function longText(prefix: string, tokenTarget = 1200): string {
+  // ~4 chars per token, so 1200 tokens ≈ 4800 chars
+  const sentence = `${prefix} - This is a detailed explanation of a business rule that spans multiple words. `;
+  const repeats = Math.ceil((tokenTarget * 4) / sentence.length);
+  return sentence.repeat(repeats);
+}
+
 describe('KnowledgeLoader', () => {
   let loader: KnowledgeLoader;
 
@@ -51,7 +59,7 @@ describe('KnowledgeLoader', () => {
     expect(prompt).toContain('</knowledge>');
   });
 
-  it('should estimate tokens', async () => {
+  it('should estimate tokens accurately', async () => {
     await loader.load([
       createSource({ id: 'test', content: 'Hello world test content' }),
     ]);
@@ -77,6 +85,47 @@ describe('KnowledgeLoader', () => {
     }]);
     expect(loader.getSourceCount()).toBe(1);
     expect(loader.buildSystemPrompt()).toContain('Loaded dynamically');
+  });
+
+  it('should return all loaded sources', async () => {
+    await loader.load([
+      createSource({ id: 'a', content: 'Content A' }),
+      createSource({ id: 'b', content: 'Content B' }),
+    ]);
+    const all = loader.getAll();
+    expect(all).toHaveLength(2);
+    expect(all[0]!.tokenCount).toBeGreaterThan(0);
+  });
+
+  it('should list unique categories', async () => {
+    await loader.load([
+      createSource({ id: 'a', content: 'A', category: 'rules' }),
+      createSource({ id: 'b', content: 'B', category: 'rules' }),
+      createSource({ id: 'c', content: 'C', category: 'parameters' }),
+    ]);
+    const cats = loader.getCategories();
+    expect(cats).toContain('rules');
+    expect(cats).toContain('parameters');
+    expect(cats).toHaveLength(2);
+  });
+
+  it('should format content with category header', () => {
+    const formatted = loader.formatForContext('Some content here', 'business_rules');
+    expect(formatted).toContain('[BUSINESS_RULES]');
+    expect(formatted).toContain('Some content here');
+  });
+
+  it('should handle file type gracefully when file not found', async () => {
+    await loader.load([{
+      id: 'missing',
+      name: 'Missing File',
+      type: 'file',
+      filePath: '/nonexistent/path/file.txt',
+      category: 'general',
+      priority: 5,
+    }]);
+    // Should not throw, just skip the source
+    expect(loader.getSourceCount()).toBe(0);
   });
 });
 
@@ -119,5 +168,118 @@ describe('StaticCagCache', () => {
       createSource({ id: 'faq', content: 'Some knowledge content for token estimation' }),
     ]);
     expect(cache.getEstimatedTokens()).toBeGreaterThan(0);
+  });
+
+  // ─── buildCacheBlocks() ─────────────────────────────────────────────────
+
+  it('should return empty array when no sources loaded', () => {
+    expect(cache.buildCacheBlocks()).toHaveLength(0);
+  });
+
+  it('should build cache blocks with cache_control ephemeral', async () => {
+    await cache.loadSources([
+      createSource({ id: 'rules', content: longText('Rule'), category: 'rules' }),
+    ]);
+    const blocks = cache.buildCacheBlocks();
+    expect(blocks.length).toBeGreaterThan(0);
+    expect(blocks[0]?.type).toBe('text');
+    expect(blocks[0]?.cache_control?.type).toBe('ephemeral');
+  });
+
+  it('should respect max 4 cache breakpoints', async () => {
+    // Create 6 categories — should be merged into ≤4 blocks
+    await cache.loadSources([
+      createSource({ id: 'r1', content: longText('Rule 1'), category: 'rules' }),
+      createSource({ id: 'p1', content: longText('Param 1'), category: 'parameters' }),
+      createSource({ id: 'd1', content: longText('Data 1'), category: 'reference_data' }),
+      createSource({ id: 'i1', content: longText('Instr 1'), category: 'instructions' }),
+      createSource({ id: 'i2', content: longText('Instr 2'), category: 'general' }),
+    ]);
+    const blocks = cache.buildCacheBlocks();
+    expect(blocks.length).toBeLessThanOrEqual(4);
+  });
+
+  it('should merge small blocks (< 1024 tokens) into larger ones', async () => {
+    // Small blocks should get merged
+    await cache.loadSources([
+      createSource({ id: 'tiny1', content: 'Small rule', category: 'rules' }),
+      createSource({ id: 'tiny2', content: 'Small param', category: 'parameters' }),
+      createSource({ id: 'big', content: longText('Big instructions'), category: 'instructions' }),
+    ]);
+    const blocks = cache.buildCacheBlocks();
+
+    // The two small blocks should be merged into one, plus the big block
+    expect(blocks.length).toBeLessThanOrEqual(2);
+    // All blocks should have cache_control
+    for (const block of blocks) {
+      expect(block.cache_control?.type).toBe('ephemeral');
+    }
+  });
+
+  it('should group by category with stable ordering', async () => {
+    await cache.loadSources([
+      createSource({ id: 'i1', content: longText('Instructions'), category: 'general' }),
+      createSource({ id: 'r1', content: longText('Rules'), category: 'rules' }),
+    ]);
+    const blocks = cache.buildCacheBlocks();
+
+    // Rules should come before instructions (stable prefix)
+    const combined = blocks.map((b) => b.text).join('\n');
+    const rulesIdx = combined.indexOf('REGRAS E FÓRMULAS');
+    const instrIdx = combined.indexOf('INSTRUÇÕES DE CONTEXTO');
+    expect(rulesIdx).toBeLessThan(instrIdx);
+  });
+
+  // ─── refresh() ──────────────────────────────────────────────────────────
+
+  it('should refresh by reloading last sources', async () => {
+    let callCount = 0;
+    const dynamicSource: StaticSource = {
+      id: 'live',
+      name: 'Live Data',
+      type: 'function',
+      category: 'parameters',
+      priority: 5,
+      loadFn: async () => {
+        callCount++;
+        return `Data version ${callCount}`;
+      },
+    };
+
+    await cache.loadSources([dynamicSource]);
+    expect(cache.getSystemPrompt()).toContain('version 1');
+
+    await cache.refresh();
+    expect(cache.getSystemPrompt()).toContain('version 2');
+    expect(callCount).toBe(2);
+  });
+
+  // ─── getLayerStats() ───────────────────────────────────────────────────
+
+  it('should return layer statistics', async () => {
+    await cache.loadSources([
+      createSource({ id: 'faq', content: 'FAQ content', category: 'rules' }),
+      createSource({ id: 'cfg', content: 'Config data', category: 'parameters' }),
+    ]);
+    const stats = cache.getLayerStats();
+
+    expect(stats.sourceCount).toBe(2);
+    expect(stats.totalTokens).toBeGreaterThan(0);
+    expect(stats.categories).toContain('rules');
+    expect(stats.categories).toContain('parameters');
+    expect(stats.lastLoadedAt).toBeInstanceOf(Date);
+  });
+
+  // ─── Token Budget Validation ────────────────────────────────────────────
+
+  it('should throw when sources exceed maxTokens budget', async () => {
+    const config = createTestConfig({
+      layers: { staticCAG: { maxTokens: 10 } },
+    });
+    const small = new StaticCagCache(config);
+
+    await expect(small.loadSources([
+      createSource({ id: 'big', content: longText('Big content', 2000) }),
+    ])).rejects.toThrow('exceeds maxTokens');
   });
 });

@@ -261,6 +261,12 @@ export interface IStaticCagLayer extends ILayer {
   loadSources(sources: StaticSource[]): Promise<void>;
   getSystemPrompt(): string;
   getContextBlocks(): ContextBlock[];
+  /** Build Anthropic API formatted blocks with cache_control */
+  buildCacheBlocks(): CacheBlock[];
+  /** Reload all sources from config */
+  refresh(): Promise<void>;
+  /** Get layer-specific stats */
+  getLayerStats(): StaticLayerStats;
   invalidate(): void;
 }
 
@@ -320,6 +326,26 @@ export type EmbeddingFunction = (text: string) => Promise<number[]>;
 
 /** Async function that fetches fresh data for dynamic snapshots */
 export type DataFetcher = () => Promise<string>;
+
+// ─── Anthropic API Types ─────────────────────────────────────────────────────
+
+/** A text block formatted for the Anthropic Messages API system prompt */
+export interface CacheBlock {
+  type: 'text';
+  text: string;
+  cache_control?: { type: 'ephemeral' };
+}
+
+export interface StaticLayerStats {
+  totalTokens: number;
+  sourceCount: number;
+  cacheBlockCount: number;
+  categories: string[];
+  lastLoadedAt: Date | null;
+}
+
+/** Standard category groups for Prompt Caching block organization */
+export type CategoryGroup = 'rules_formulas' | 'parameters' | 'reference_data' | 'instructions';
 
 // ─── Supporting Types ────────────────────────────────────────────────────────
 
