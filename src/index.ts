@@ -16,6 +16,9 @@ export { SemanticCache, EmbeddingStore, cosineSimilarity, dotProduct, euclideanD
 export { ThinkEngine, ComplexTaskRegistry } from './layers/layer4-think-tool/index.js';
 export { ACEEngine, KnowledgeStore, PrioritySystem } from './layers/layer5-curated-knowledge/index.js';
 
+// Analytics
+export { AnalyticsEngine } from './analytics/index.js';
+
 // Adapters
 export { AnthropicAdapter } from './adapters/anthropic-adapter.js';
 export { SupabaseAdapter } from './adapters/supabase-adapter.js';

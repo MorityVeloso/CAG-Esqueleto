@@ -236,6 +236,46 @@ export interface UsageAnalytics {
   userId?: string;
 }
 
+/** Aggregated daily stats (mirrors cag_daily_stats SQL view) */
+export interface DailyStats {
+  date: string;
+  totalQueries: number;
+  cacheHits: number;
+  cacheHitRate: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCachedTokens: number;
+  totalCostUSD: number;
+  avgProcessingMs: number;
+  cacheEfficiencyPct: number;
+}
+
+/** Daily savings from prompt caching (mirrors cag_savings_report SQL view) */
+export interface SavingsReport {
+  date: string;
+  tokensServedFromCache: number;
+  wouldHaveCostUSD: number;
+  actualCostUSD: number;
+  savedUSD: number;
+}
+
+/** Per-layer performance breakdown */
+export interface LayerPerformance {
+  layer: string;
+  avgLatencyMs: number;
+  hitRate: number;
+  totalInvocations: number;
+}
+
+/** Projected cost based on recent usage trends */
+export interface CostProjection {
+  dailyAvgCostUSD: number;
+  projectedDays: number;
+  projectedCostUSD: number;
+  projectedSavingsUSD: number;
+  avgQueriesPerDay: number;
+}
+
 // ─── Logging ─────────────────────────────────────────────────────────────────
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
