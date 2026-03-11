@@ -68,12 +68,20 @@ const loggingConfigSchema = z.object({
   customFn: z.function().args(z.unknown()).optional(),
 });
 
+const pricingConfigSchema = z.object({
+  inputTokens: z.number().nonnegative().default(3.0),
+  cachedInputTokens: z.number().nonnegative().default(0.30),
+  outputTokens: z.number().nonnegative().default(15.0),
+}).default({});
+
 const cagConfigSchema = z.object({
   anthropic: z.object({
     apiKey: z.string().min(1, 'anthropic.apiKey is required'),
     model: z.string().default('claude-sonnet-4-20250514'),
     maxTokens: z.number().positive().default(8192),
     temperature: z.number().min(0).max(1).default(0.3),
+    pricing: pricingConfigSchema,
+    maxRetries: z.number().int().min(0).max(10).default(3),
   }),
   storage: z.object({
     type: z.enum(['supabase', 'redis', 'memory']).default('memory'),
@@ -139,6 +147,12 @@ const DEFAULTS: Omit<CAGConfig, 'anthropic'> & { anthropic: Omit<CAGConfig['anth
     model: 'claude-sonnet-4-20250514',
     maxTokens: 8192,
     temperature: 0.3,
+    pricing: {
+      inputTokens: 3.0,
+      cachedInputTokens: 0.30,
+      outputTokens: 15.0,
+    },
+    maxRetries: 3,
   },
   storage: {
     type: 'memory',

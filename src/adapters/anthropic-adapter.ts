@@ -4,11 +4,11 @@
  * Wraps @anthropic-ai/sdk to provide:
  *  - Message creation with prompt caching support
  *  - Extended thinking (Think Tool)
- *  - Token counting
+ *  - Token usage and cost calculation
  */
 
 import Anthropic from '@anthropic-ai/sdk';
-import type { CAGConfig, Message, ContextBlock } from '@core/types.js';
+import type { CAGConfig, Message, PricingConfig } from '@core/types.js';
 
 export interface AnthropicUsage {
   inputTokens: number;
@@ -29,13 +29,12 @@ export class AnthropicAdapter {
   async createMessage(params: {
     systemPrompt: string;
     messages: Message[];
-    contextBlocks?: ContextBlock[];
     useThinking?: boolean;
     thinkingBudget?: number;
   }): Promise<{ content: string; thinkingProcess?: string; usage: AnthropicUsage }> {
     const { systemPrompt, messages, useThinking = false, thinkingBudget } = params;
 
-    // Build system with cache control
+    // Build system blocks with cache_control for prompt caching
     const system: Anthropic.Messages.TextBlockParam[] = [{
       type: 'text' as const,
       text: systemPrompt,
@@ -63,12 +62,13 @@ export class AnthropicAdapter {
 
     const response = await this.client.messages.create(requestParams);
 
+    // Extract text content
     const textBlocks = response.content.filter(
       (block): block is Anthropic.Messages.TextBlock => block.type === 'text',
     );
     const content = textBlocks.map((b) => b.text).join('');
 
-    // Extract thinking if present
+    // Extract thinking process if present
     const thinkingBlocks = response.content.filter(
       (block) => block.type === 'thinking',
     );
@@ -76,15 +76,44 @@ export class AnthropicAdapter {
       ? thinkingBlocks.map((b) => (b as { thinking: string }).thinking).join('\n')
       : undefined;
 
+    // Parse usage from API response
     const rawUsage = response.usage as Record<string, number>;
+    const inputTokens = rawUsage['input_tokens'] ?? 0;
+    const outputTokens = rawUsage['output_tokens'] ?? 0;
+    const cachedInputTokens = rawUsage['cache_read_input_tokens'] ?? 0;
+
     const usage: AnthropicUsage = {
-      inputTokens: rawUsage['input_tokens'] ?? 0,
-      outputTokens: rawUsage['output_tokens'] ?? 0,
-      cachedInputTokens: rawUsage['cache_read_input_tokens'] ?? 0,
-      estimatedCost: 0,
+      inputTokens,
+      outputTokens,
+      cachedInputTokens,
+      estimatedCost: AnthropicAdapter.calculateCost(
+        inputTokens,
+        outputTokens,
+        cachedInputTokens,
+        this.config.anthropic.pricing,
+      ),
     };
 
     return { content, thinkingProcess, usage };
+  }
+
+  /**
+   * Calculate cost in USD based on Anthropic pricing.
+   *
+   * Fresh input tokens that were NOT cached are:
+   *   totalInput - cachedInput (the cached ones get the discount)
+   */
+  static calculateCost(
+    inputTokens: number,
+    outputTokens: number,
+    cachedInputTokens: number,
+    pricing: PricingConfig,
+  ): number {
+    const freshInputTokens = Math.max(0, inputTokens - cachedInputTokens);
+    const freshInputCost = (freshInputTokens / 1_000_000) * pricing.inputTokens;
+    const cachedInputCost = (cachedInputTokens / 1_000_000) * pricing.cachedInputTokens;
+    const outputCost = (outputTokens / 1_000_000) * pricing.outputTokens;
+    return freshInputCost + cachedInputCost + outputCost;
   }
 
   getClient(): Anthropic {

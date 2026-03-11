@@ -13,6 +13,10 @@ export interface CAGConfig {
     maxTokens: number;
     /** @default 0.3 */
     temperature: number;
+    /** Pricing per 1M tokens (defaults to Sonnet pricing) */
+    pricing: PricingConfig;
+    /** Max API retries with exponential backoff @default 3 */
+    maxRetries: number;
   };
   storage: {
     /** 'memory' for tests, 'supabase' or 'redis' for production */
@@ -22,6 +26,15 @@ export interface CAGConfig {
   };
   layers: LayerConfig;
   logging: LoggingConfig;
+}
+
+export interface PricingConfig {
+  /** Price per 1M input tokens @default 3.00 (Sonnet) */
+  inputTokens: number;
+  /** Price per 1M cached input tokens @default 0.30 (90% discount) */
+  cachedInputTokens: number;
+  /** Price per 1M output tokens @default 15.00 (Sonnet) */
+  outputTokens: number;
 }
 
 export interface LayerConfig {
@@ -278,6 +291,36 @@ export interface ICuratedKnowledgeLayer extends ILayer {
   removeStale(): Promise<number>;
 }
 
+// ─── Engine Stats ───────────────────────────────────────────────────────────
+
+export interface EngineStats {
+  totalQueries: number;
+  cacheHitRate: number;
+  avgResponseTimeMs: number;
+  tokenUsage: {
+    totalInput: number;
+    totalOutput: number;
+    totalCached: number;
+    totalCostUSD: number;
+  };
+  layerStats: {
+    staticCag: { loaded: boolean; sourceCount: number; tokenCount: number };
+    dynamicCag: { snapshotCount: number; lastUpdated: Date | null };
+    semanticCache: CacheStats;
+    thinkTool: { activationCount: number };
+    curatedKnowledge: { entryCount: number };
+  };
+  uptimeMs: number;
+}
+
+// ─── Functions ──────────────────────────────────────────────────────────────
+
+/** Async function that generates an embedding vector from text */
+export type EmbeddingFunction = (text: string) => Promise<number[]>;
+
+/** Async function that fetches fresh data for dynamic snapshots */
+export type DataFetcher = () => Promise<string>;
+
 // ─── Supporting Types ────────────────────────────────────────────────────────
 
 export interface CacheStats {
@@ -300,13 +343,17 @@ export interface CompressedSnapshot {
 // ─── Events ──────────────────────────────────────────────────────────────────
 
 export type CAGEvent =
-  | { type: 'cache_hit'; query: string; similarity: number }
-  | { type: 'cache_miss'; query: string }
-  | { type: 'snapshot_updated'; key: string }
-  | { type: 'knowledge_added'; id: string; category: string }
-  | { type: 'thinking_activated'; query: string; budgetTokens: number }
-  | { type: 'layer_error'; layer: string; error: Error }
-  | { type: 'query_complete'; queryId: string; analytics: UsageAnalytics };
+  | { type: 'beforeQuery'; query: CAGQuery }
+  | { type: 'afterQuery'; query: CAGQuery; response: CAGResponse }
+  | { type: 'cacheHit'; query: string; similarity: number }
+  | { type: 'cacheMiss'; query: string }
+  | { type: 'contextAssembled'; context: AssembledContext; layersUsed: string[] }
+  | { type: 'thinkingActivated'; query: string; budgetTokens: number }
+  | { type: 'layerError'; layer: string; error: Error }
+  | { type: 'snapshotUpdated'; key: string }
+  | { type: 'knowledgeAdded'; id: string; category: string };
+
+export type CAGEventType = CAGEvent['type'];
 
 export type CAGEventHandler = (event: CAGEvent) => void;
 
