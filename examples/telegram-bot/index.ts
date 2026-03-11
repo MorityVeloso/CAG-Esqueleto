@@ -1,73 +1,81 @@
 /**
  * CAG-Esqueleto — Telegram Bot Example
  *
- * Shows how to integrate CAG with a Telegram bot.
- * Requires: node-telegram-bot-api (not included in dependencies).
+ * Shows how to integrate CAG with a Telegram bot using Telegraf.
  *
- * Install: npm install node-telegram-bot-api
+ * Install: npm install telegraf
+ * Run: npx tsx examples/telegram-bot/index.ts
  */
 
-import {
-  CAGEngine,
-  createConfigFromEnv,
-  StaticCagCache,
-  SemanticCache,
-  ThinkEngine,
-} from 'cag-esqueleto';
+import { createCAG, type CAGEngine } from 'cag-esqueleto';
+import { Telegraf } from 'telegraf';
 
-// Pseudo-code — replace with actual Telegram bot setup
-interface TelegramMessage {
-  chat: { id: number };
-  text?: string;
-}
+let cag: CAGEngine;
 
-async function main() {
-  const config = createConfigFromEnv();
+const bot = new Telegraf(process.env.TELEGRAM_TOKEN!);
 
-  // Setup CAG layers
-  const staticCag = new StaticCagCache(config);
-  const semanticCache = new SemanticCache(config);
-  const thinkTool = new ThinkEngine(config);
+// ── Initialize CAG once ─────────────────────────────────────────────────
 
-  await staticCag.loadKnowledge([
-    {
-      id: 'bot-instructions',
-      type: 'text',
-      content: 'You are a helpful customer support bot. Be concise and friendly.',
+async function init() {
+  cag = await createCAG({
+    anthropic: { apiKey: process.env.ANTHROPIC_API_KEY! },
+    storage: {
+      type: 'supabase',
+      supabase: {
+        url: process.env.SUPABASE_URL!,
+        serviceKey: process.env.SUPABASE_SERVICE_KEY!,
+      },
     },
-  ]);
-
-  // Wire up engine
-  const engine = new CAGEngine(config);
-  engine.registerStaticCag(staticCag);
-  engine.registerSemanticCache(semanticCache);
-  engine.registerThinkTool(thinkTool);
-  await engine.initialize();
-
-  // Handle incoming messages
-  async function handleMessage(msg: TelegramMessage): Promise<string> {
-    if (!msg.text) return 'Please send a text message.';
-
-    try {
-      const response = await engine.query(msg.text);
-
-      const stats = response.cacheHit
-        ? `(cached, ${response.latencyMs}ms)`
-        : `(${response.layersUsed.join('+')}, ${response.latencyMs}ms)`;
-
-      console.log(`Chat ${msg.chat.id}: ${stats}`);
-      return response.content;
-    } catch (error) {
-      console.error('CAG error:', error);
-      return 'Sorry, I encountered an error. Please try again.';
-    }
-  }
-
-  // Example usage
-  const reply = await handleMessage({ chat: { id: 123 }, text: 'What is your return policy?' });
-  console.log('Bot reply:', reply);
-
-  await engine.shutdown();
+    layers: {
+      staticCAG: {
+        sources: [
+          {
+            id: 'bot-instructions',
+            name: 'Bot Instructions',
+            type: 'text',
+            content: 'You are a helpful customer support bot. Be concise and friendly.',
+            category: 'instructions',
+            priority: 10,
+          },
+        ],
+      },
+    },
+  });
 }
 
-main().catch(console.error);
+// ── Handle incoming messages ────────────────────────────────────────────
+
+bot.on('text', async (ctx) => {
+  const userId = ctx.from.id.toString();
+
+  try {
+    const response = await cag.query({
+      message: ctx.message.text,
+      userId,
+      sessionId: `telegram_${userId}`,
+    });
+
+    await ctx.reply(response.answer);
+
+    // Log
+    console.log(
+      `[${userId}] Cache: ${response.cacheHit}, ` +
+      `Cost: $${response.usage.estimatedCost.toFixed(4)}, ` +
+      `Time: ${response.processingTime.total}ms`,
+    );
+  } catch (error) {
+    console.error('CAG error:', error);
+    await ctx.reply('Sorry, I encountered an error. Please try again.');
+  }
+});
+
+// ── Start ───────────────────────────────────────────────────────────────
+
+init().then(() => {
+  bot.launch();
+  console.log('Bot started!');
+});
+
+// Graceful shutdown
+process.once('SIGINT', () => { bot.stop('SIGINT'); cag?.shutdown(); });
+process.once('SIGTERM', () => { bot.stop('SIGTERM'); cag?.shutdown(); });

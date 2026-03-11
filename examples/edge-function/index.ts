@@ -1,20 +1,51 @@
 /**
  * CAG-Esqueleto — Supabase Edge Function Example
  *
- * Deploy as a Supabase Edge Function for serverless CAG.
+ * Singleton pattern: initialize once, reuse across requests.
  *
  * Deploy: supabase functions deploy cag-query
  */
 
-import {
-  CAGEngine,
-  createConfig,
-  StaticCagCache,
-  SemanticCache,
-  ThinkEngine,
-} from 'cag-esqueleto';
+import { createCAG } from 'cag-esqueleto';
 
-// Edge Function handler (Deno runtime)
+// Singleton — initialized on first request, reused across invocations
+let cag: Awaited<ReturnType<typeof createCAG>> | null = null;
+
+async function getEngine() {
+  if (!cag) {
+    cag = await createCAG({
+      anthropic: {
+        // @ts-expect-error Deno.env is available in Edge Functions
+        apiKey: Deno.env.get('ANTHROPIC_API_KEY')!,
+      },
+      storage: {
+        type: 'supabase',
+        supabase: {
+          // @ts-expect-error Deno.env is available in Edge Functions
+          url: Deno.env.get('SUPABASE_URL')!,
+          // @ts-expect-error Deno.env is available in Edge Functions
+          serviceKey: Deno.env.get('SUPABASE_SERVICE_KEY')!,
+        },
+      },
+      layers: {
+        staticCAG: {
+          sources: [
+            {
+              id: 'system',
+              name: 'System Instructions',
+              type: 'text',
+              content: 'You are a helpful assistant for our grain trading company.',
+              category: 'instructions',
+              priority: 10,
+            },
+          ],
+        },
+      },
+    });
+  }
+  return cag;
+}
+
 // @ts-expect-error Deno.serve is available in Supabase Edge Functions
 Deno.serve(async (req: Request) => {
   if (req.method !== 'POST') {
@@ -25,50 +56,27 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { query } = (await req.json()) as { query: string };
+    const { message, userId } = (await req.json()) as {
+      message: string;
+      userId?: string;
+    };
 
-    if (!query) {
-      return new Response(JSON.stringify({ error: 'Missing query parameter' }), {
+    if (!message) {
+      return new Response(JSON.stringify({ error: 'Missing message' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       });
     }
 
-    // Create config from Deno env
-    const config = createConfig({
-      // @ts-expect-error Deno.env is available in Edge Functions
-      anthropicApiKey: Deno.env.get('ANTHROPIC_API_KEY'),
-      model: 'claude-sonnet-4-20250514',
-      maxTokens: 4096,
-    });
-
-    // Setup layers
-    const staticCag = new StaticCagCache(config);
-    const thinkTool = new ThinkEngine(config);
-
-    await staticCag.loadKnowledge([
-      {
-        id: 'system',
-        type: 'text',
-        content: 'You are a helpful assistant.',
-      },
-    ]);
-
-    const engine = new CAGEngine(config);
-    engine.registerStaticCag(staticCag);
-    engine.registerThinkTool(thinkTool);
-    await engine.initialize();
-
-    const response = await engine.query(query);
-
-    await engine.shutdown();
+    const engine = await getEngine();
+    const response = await engine.query({ message, userId });
 
     return new Response(
       JSON.stringify({
-        content: response.content,
-        cached: response.cacheHit,
-        latency_ms: response.latencyMs,
-        layers: response.layersUsed,
+        answer: response.answer,
+        cacheHit: response.cacheHit,
+        cost: response.usage.estimatedCost,
+        processingTime: response.processingTime.total,
       }),
       {
         status: 200,

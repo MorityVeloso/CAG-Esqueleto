@@ -1,85 +1,82 @@
 /**
  * CAG-Esqueleto — Supabase Integration Example
  *
- * Full setup with persistent semantic cache and knowledge store.
- * Requires: Supabase project with pgvector extension.
+ * Full setup with persistent storage via Supabase (pgvector).
  *
  * Setup:
  *  1. Run sql/*.sql migrations on your Supabase project
- *  2. Set SUPABASE_URL and SUPABASE_SERVICE_KEY in .env
+ *  2. Set ANTHROPIC_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY in .env
+ *
+ * Run: npx tsx examples/supabase-integration/index.ts
  */
 
-import {
-  CAGEngine,
-  createConfigFromEnv,
-  StaticCagCache,
-  SemanticCache,
-  ACEEngine,
-  ThinkEngine,
-  AnthropicAdapter,
-} from 'cag-esqueleto';
+import { createCAG } from 'cag-esqueleto';
+import { createClient } from '@supabase/supabase-js';
 
 async function main() {
-  const config = createConfigFromEnv();
-
-  // Initialize all 5 layers
-  const staticCag = new StaticCagCache(config);
-  const semanticCache = new SemanticCache(config);
-  const thinkTool = new ThinkEngine(config);
-  const ace = new ACEEngine(config);
-  const anthropic = new AnthropicAdapter(config);
-
-  // Inject embedding function
-  // TODO: Replace with actual embedding API call
-  const mockEmbedding = async (_text: string): Promise<number[]> => {
-    return new Array(1536).fill(0).map(() => Math.random());
-  };
-
-  semanticCache.setEmbeddingFunction(mockEmbedding);
-  ace.setEmbeddingFunction(mockEmbedding);
-
-  // Load static knowledge
-  await staticCag.loadKnowledge([
-    {
-      id: 'product-docs',
-      type: 'markdown',
-      content: '# Product Documentation\n\nYour product docs here...',
+  const cag = await createCAG({
+    anthropic: { apiKey: process.env.ANTHROPIC_API_KEY! },
+    storage: {
+      type: 'supabase',
+      supabase: {
+        url: process.env.SUPABASE_URL!,
+        serviceKey: process.env.SUPABASE_SERVICE_KEY!,
+      },
     },
-  ]);
+    layers: {
+      staticCAG: {
+        sources: [
+          { id: 'rules', name: 'Rules', type: 'file', filePath: './knowledge/rules.md', category: 'rules', priority: 10 },
+          { id: 'formulas', name: 'Formulas', type: 'file', filePath: './knowledge/formulas.md', category: 'formulas', priority: 9 },
+          { id: 'params', name: 'Parameters', type: 'file', filePath: './knowledge/params.json', category: 'parameters', priority: 8 },
+        ],
+      },
+      dynamicCAG: {
+        updateInterval: 30, // A cada 30 minutos
+        snapshotFn: async () => {
+          const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_KEY!);
+          const { data: ops, error: opsError } = await supabase.from('operations').select('*').eq('status', 'active');
+          if (opsError) throw opsError;
 
-  // Add curated knowledge
-  await ace.addKnowledge({
-    id: 'pricing-strategy',
-    content: 'Our pricing follows a value-based model...',
-    category: 'business',
-    priority: 0.9,
-    usageCount: 0,
-    lastUsedAt: new Date(),
-    createdAt: new Date(),
+          const { data: financeiro, error: finError } = await supabase.rpc('get_financial_position');
+          if (finError) throw finError;
+
+          return `
+            OPERAÇÕES ATIVAS: ${ops?.length ?? 0}
+            ${ops?.map((o) => `- ${o.type} ${o.product} ${o.quantity}t @ R$${o.price}`).join('\n')}
+            POSIÇÃO FINANCEIRA:
+            ${JSON.stringify(financeiro, null, 2)}
+          `;
+        },
+      },
+      semanticCache: {
+        similarityThreshold: 0.87,
+        ttl: 3600, // 1 hora
+      },
+      thinkTool: {
+        triggerPatterns: ['calcul', 'concili', 'simul', 'compar', 'analise'],
+      },
+    },
   });
 
-  // Wire up engine
-  const engine = new CAGEngine(config);
-  engine.registerStaticCag(staticCag);
-  engine.registerSemanticCache(semanticCache);
-  engine.registerThinkTool(thinkTool);
-  engine.registerCuratedKnowledge(ace);
+  // ── Query com Think Tool (detecta "calcule") ──────────────────────────
 
-  engine.on((event) => {
-    console.log(`[${event.type}]`, event);
+  const resp = await cag.query({
+    message: 'Calcule a margem líquida da operação 547 considerando ICMS, PIS/COFINS e frete',
   });
 
-  await engine.initialize();
+  if (resp.thinkingProcess) {
+    console.log('Raciocínio:', resp.thinkingProcess);
+  }
+  console.log('Resposta:', resp.answer);
 
-  // First query — cache miss, calls API
-  const r1 = await engine.query('How does your pricing work?');
-  console.log('First query:', r1.cacheHit ? 'CACHE HIT' : 'CACHE MISS');
+  // ── Stats ─────────────────────────────────────────────────────────────
 
-  // Similar query — should hit semantic cache
-  const r2 = await engine.query('What is your pricing model?');
-  console.log('Similar query:', r2.cacheHit ? 'CACHE HIT' : 'CACHE MISS');
+  const stats = await cag.getStats();
+  console.log('Cache hit rate:', stats.layerStats.semanticCache.hitRate);
+  console.log('Total cost:', stats.tokenUsage.totalCostUSD);
 
-  await engine.shutdown();
+  await cag.shutdown();
 }
 
 main().catch(console.error);
