@@ -1,53 +1,61 @@
 -- CAG-Esqueleto: Semantic Cache Table
 -- Requires pgvector extension for similarity search
 
-create extension if not exists vector;
+CREATE EXTENSION IF NOT EXISTS vector;
 
-create table if not exists cag_semantic_cache (
-  id uuid primary key default gen_random_uuid(),
-  query text not null,
-  response text not null,
-  embedding vector(1536),
-  hit_count integer default 0 not null,
-  metadata jsonb default '{}'::jsonb not null,
-  created_at timestamp with time zone default now() not null,
-  last_accessed_at timestamp with time zone default now() not null,
-  updated_at timestamp with time zone default now() not null
+CREATE TABLE IF NOT EXISTS cag_semantic_cache (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  query_text TEXT NOT NULL,
+  query_embedding vector(1024),  -- Voyage 3 Large = 1024 dims
+  response_text TEXT NOT NULL,
+  hit_count INTEGER DEFAULT 0,
+  similarity_score FLOAT,
+  metadata JSONB DEFAULT '{}',
+  created_at TIMESTAMPTZ DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Index for vector similarity search
-create index if not exists idx_cag_semantic_cache_embedding
-  on cag_semantic_cache using ivfflat (embedding vector_cosine_ops)
-  with (lists = 100);
+-- Index for vector similarity search (ivfflat for fast approximate search)
+CREATE INDEX IF NOT EXISTS idx_semantic_cache_embedding
+  ON cag_semantic_cache
+  USING ivfflat (query_embedding vector_cosine_ops)
+  WITH (lists = 100);
 
--- Index for cleanup queries
-create index if not exists idx_cag_semantic_cache_last_accessed
-  on cag_semantic_cache (last_accessed_at);
+-- Index for TTL cleanup
+CREATE INDEX IF NOT EXISTS idx_semantic_cache_expires
+  ON cag_semantic_cache (expires_at);
 
--- Function for similarity search
-create or replace function match_semantic_cache(
-  query_embedding vector(1536),
-  similarity_threshold float,
-  match_count int
+-- Function for similarity search with TTL filtering
+CREATE OR REPLACE FUNCTION cag_search_similar_queries(
+  query_embedding vector(1024),
+  similarity_threshold FLOAT DEFAULT 0.85,
+  max_results INT DEFAULT 5
 )
-returns table (
-  id uuid,
-  query text,
-  response text,
-  similarity float
-)
-language sql stable
-as $$
-  select
-    id,
-    query,
-    response,
-    1 - (embedding <=> query_embedding) as similarity
-  from cag_semantic_cache
-  where 1 - (embedding <=> query_embedding) > similarity_threshold
-  order by embedding <=> query_embedding
-  limit match_count;
-$$;
+RETURNS TABLE (
+  id UUID,
+  query_text TEXT,
+  response_text TEXT,
+  similarity FLOAT,
+  hit_count INTEGER,
+  metadata JSONB
+) AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    sc.id,
+    sc.query_text,
+    sc.response_text,
+    1 - (sc.query_embedding <=> query_embedding) as similarity,
+    sc.hit_count,
+    sc.metadata
+  FROM cag_semantic_cache sc
+  WHERE sc.expires_at > now()
+    AND 1 - (sc.query_embedding <=> query_embedding) >= similarity_threshold
+  ORDER BY sc.query_embedding <=> query_embedding
+  LIMIT max_results;
+END;
+$$ LANGUAGE plpgsql;
 
 -- RLS
-alter table cag_semantic_cache enable row level security;
+ALTER TABLE cag_semantic_cache ENABLE ROW LEVEL SECURITY;

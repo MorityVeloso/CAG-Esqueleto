@@ -12,7 +12,7 @@ export type * from './core/types.js';
 // Layers
 export { StaticCagCache, KnowledgeLoader } from './layers/layer1-static-cag/index.js';
 export { DynamicSnapshot, AdaptiveCompressor, SnapshotScheduler } from './layers/layer2-dynamic-cag/index.js';
-export { SemanticCache, EmbeddingStore, cosineSimilarity, findTopK } from './layers/layer3-semantic-cache/index.js';
+export { SemanticCache, EmbeddingStore, cosineSimilarity, dotProduct, euclideanDistance, normalizeVector, findTopK } from './layers/layer3-semantic-cache/index.js';
 export { ThinkEngine, ComplexTaskRegistry } from './layers/layer4-think-tool/index.js';
 export { ACEEngine, KnowledgeStore, PrioritySystem } from './layers/layer5-curated-knowledge/index.js';
 

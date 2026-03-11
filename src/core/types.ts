@@ -284,11 +284,30 @@ export interface IDynamicCagLayer extends ILayer {
 }
 
 export interface ISemanticCacheLayer extends ILayer {
-  get(query: string): Promise<SemanticCacheEntry | null>;
-  set(query: string, response: string, metadata?: Record<string, unknown>): Promise<void>;
-  invalidate(query: string): Promise<void>;
+  /** Look up cached response by semantic similarity */
+  lookup(query: string): Promise<CacheLookupResult | null>;
+  /** Store a query-response pair with embedding */
+  store(query: string, response: string, metadata?: Record<string, unknown>): Promise<void>;
+  /** Invalidate entries matching pattern (all if no pattern) */
+  invalidate(pattern?: string): Promise<number>;
+  /** Remove entries older than maxAgeSeconds */
+  invalidateByAge(maxAgeSeconds: number): Promise<number>;
+  /** Clear all entries */
   clear(): Promise<void>;
+  /** Get cache statistics */
   getStats(): CacheStats;
+  /** Set the embedding function (dependency injection) */
+  setEmbeddingFunction(fn: (text: string) => Promise<number[]>): void;
+}
+
+/** Result from a semantic cache lookup */
+export interface CacheLookupResult {
+  response: string;
+  similarity: number;
+  queryOriginal: string;
+  cachedAt: Date;
+  hitCount: number;
+  metadata: Record<string, unknown>;
 }
 
 export interface IThinkToolLayer extends ILayer {
