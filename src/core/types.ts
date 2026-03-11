@@ -311,8 +311,54 @@ export interface CacheLookupResult {
 }
 
 export interface IThinkToolLayer extends ILayer {
+  /** Check if Think Tool should be activated for this query */
   shouldActivate(query: string, context: ContextBlock[]): boolean;
+  /** Get the thinking budget in tokens */
   getThinkingBudget(): number;
+  /** Get the Anthropic tool definition for the "think" tool */
+  getToolDefinition(): AnthropicToolDef;
+  /** Extract thinking result from an Anthropic API response */
+  extractThinking(response: AnthropicToolResponse): ThinkResult | null;
+  /** Build tool configuration for the API call */
+  buildToolConfig(): { tools: AnthropicToolDef[]; tool_choice: { type: string } };
+}
+
+/** Anthropic tool definition format */
+export interface AnthropicToolDef {
+  name: string;
+  description: string;
+  input_schema: {
+    type: 'object';
+    properties: Record<string, { type: string; description: string }>;
+    required: string[];
+  };
+}
+
+/** Simplified Anthropic response content block for tool use parsing */
+export interface AnthropicToolResponse {
+  content: Array<
+    | { type: 'text'; text: string }
+    | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+  >;
+  usage?: { input_tokens: number; output_tokens: number };
+}
+
+/** Result extracted from a Think Tool invocation */
+export interface ThinkResult {
+  reasoning: string;
+  conclusion: string;
+  tokensUsed: number;
+}
+
+/** Pre-defined complex task that always activates Think Tool */
+export interface ComplexTask {
+  id: string;
+  name: string;
+  patterns: RegExp[];
+  /** Extra instructions appended to system prompt when this task is detected */
+  systemPromptAddition: string;
+  /** Categories of context required for this task */
+  requiredContext?: string[];
 }
 
 export interface ICuratedKnowledgeLayer extends ILayer {
