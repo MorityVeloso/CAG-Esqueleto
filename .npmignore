@@ -1,0 +1,23 @@
+# Source
+src/
+tests/
+examples/
+
+# Config
+tsconfig.json
+tsup.config.ts
+vitest.config.ts
+.eslintrc*
+.prettierrc*
+.editorconfig
+
+# Dev
+.github/
+.vscode/
+.env*
+!.env.example
+
+# Misc
+*.test.ts
+*.spec.ts
+.gitignore

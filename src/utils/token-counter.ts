@@ -6,7 +6,7 @@
  * falls back to character-based estimation.
  */
 
-let tiktokenEncoder: { encode: (text: string) => number[] } | null = null;
+let tiktokenEncoder: { encode: (text: string) => { length: number } } | null = null;
 
 /**
  * Initialize tiktoken encoder (async, loads WASM).

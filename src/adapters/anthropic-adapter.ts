@@ -77,7 +77,7 @@ export class AnthropicAdapter {
       : undefined;
 
     // Parse usage from API response
-    const rawUsage = response.usage as Record<string, number>;
+    const rawUsage = response.usage as unknown as Record<string, number>;
     const inputTokens = rawUsage['input_tokens'] ?? 0;
     const outputTokens = rawUsage['output_tokens'] ?? 0;
     const cachedInputTokens = rawUsage['cache_read_input_tokens'] ?? 0;

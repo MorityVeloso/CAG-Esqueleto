@@ -123,8 +123,8 @@ export class ThinkEngine implements IThinkToolLayer {
       if (block.type === 'tool_use' && block.name === 'think') {
         const input = block.input;
         return {
-          reasoning: (input.reasoning as string) ?? '',
-          conclusion: (input.conclusion as string) ?? '',
+          reasoning: (input['reasoning'] as string) ?? '',
+          conclusion: (input['conclusion'] as string) ?? '',
           tokensUsed: response.usage?.output_tokens ?? 0,
         };
       }
