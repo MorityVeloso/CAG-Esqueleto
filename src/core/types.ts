@@ -362,10 +362,27 @@ export interface ComplexTask {
 }
 
 export interface ICuratedKnowledgeLayer extends ILayer {
-  addEntry(entry: Omit<CuratedKnowledgeEntry, 'id' | 'usageCount' | 'lastUsedAt' | 'createdAt'>): Promise<CuratedKnowledgeEntry>;
-  getRelevant(query: string, limit?: number): Promise<CuratedKnowledgeEntry[]>;
+  /** Explicitly teach the system new knowledge */
+  teach(content: string, category: string, tags?: string[], createdBy?: string): Promise<CuratedKnowledgeEntry>;
+  /** Auto-extract knowledge from conversations (corrections, new info) */
+  autoExtract(conversation: Message[], response: string): Promise<CuratedKnowledgeEntry | null>;
+  /** Get relevant knowledge as a context block, respecting maxTokens */
+  getRelevantKnowledge(query: string, maxTokens: number): Promise<ContextBlock>;
+  /** Record that an entry was used (boosts priority) */
+  recordUsage(entryId: string): Promise<void>;
+  /** Apply priority decay to all entries; prune dead ones */
   decayPriorities(): Promise<void>;
-  removeStale(): Promise<number>;
+  /** Provide feedback on an entry (positive boosts, negative penalizes) */
+  feedback(entryId: string, helpful: boolean): Promise<void>;
+  /** Get layer statistics */
+  getStats(): CuratedKnowledgeStats;
+}
+
+export interface CuratedKnowledgeStats {
+  totalEntries: number;
+  avgPriority: number;
+  categoryCounts: Record<string, number>;
+  sourceCounts: Record<string, number>;
 }
 
 // ─── Engine Stats ───────────────────────────────────────────────────────────

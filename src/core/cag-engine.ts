@@ -36,7 +36,7 @@ import { SemanticCache } from '../layers/layer3-semantic-cache/semantic-cache.js
 import { ThinkEngine } from '../layers/layer4-think-tool/think-engine.js';
 import { ACEEngine } from '../layers/layer5-curated-knowledge/ace-engine.js';
 import { AnthropicAdapter } from '../adapters/anthropic-adapter.js';
-import { countTokens, initTokenCounter } from '../utils/token-counter.js';
+import { initTokenCounter } from '../utils/token-counter.js';
 import { Logger } from '../utils/logger.js';
 
 export class CAGEngine {
@@ -232,19 +232,12 @@ export class CAGEngine {
     // L5 — Curated Knowledge (with fallback)
     if (this.config.layers.curatedKnowledge.enabled) {
       try {
-        const relevant = await this.curatedKnowledge.getRelevant(cagQuery.message, 5);
-        if (relevant.length > 0) {
-          const curatedContent = relevant.map((k) => k.content).join('\n\n');
-          const block: ContextBlock = {
-            id: 'curated-knowledge',
-            layer: 'curated',
-            content: curatedContent,
-            tokenCount: countTokens(curatedContent),
-            cachedAt: new Date(),
-            expiresAt: new Date(Date.now() + 3600_000),
-            metadata: { entryCount: relevant.length },
-          };
-          contextBlocks.push(block);
+        const curatedBlock = await this.curatedKnowledge.getRelevantKnowledge(
+          cagQuery.message,
+          this.config.layers.curatedKnowledge.maxEntries * 50, // rough token budget
+        );
+        if (curatedBlock.content.length > 0) {
+          contextBlocks.push(curatedBlock);
           layersUsed.push('curated');
         }
       } catch (error) {
@@ -339,13 +332,7 @@ export class CAGEngine {
   async teach(content: string, category: string, tags: string[] = []): Promise<CuratedKnowledgeEntry> {
     if (!this.initialized) throw new Error('CAGEngine not initialized.');
 
-    const entry = await this.curatedKnowledge.addEntry({
-      content,
-      source: 'user_taught',
-      category,
-      priority: 0.7,
-      tags,
-    });
+    const entry = await this.curatedKnowledge.teach(content, category, tags);
 
     this.emit({ type: 'knowledgeAdded', id: entry.id, category });
     this.logger.info('Knowledge taught', { id: entry.id, category });
@@ -380,7 +367,7 @@ export class CAGEngine {
         },
         semanticCache: cacheStats,
         thinkTool: { activationCount: this.thinkActivationCount },
-        curatedKnowledge: { entryCount: this.curatedKnowledge.getStore().size() },
+        curatedKnowledge: { entryCount: this.curatedKnowledge.getStats().totalEntries },
       },
       uptimeMs: this.startedAt ? Date.now() - this.startedAt.getTime() : 0,
     };
