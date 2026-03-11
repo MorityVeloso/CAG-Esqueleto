@@ -271,10 +271,16 @@ export interface IStaticCagLayer extends ILayer {
 }
 
 export interface IDynamicCagLayer extends ILayer {
-  createSnapshot(content: string, key?: string): Promise<ContextBlock>;
-  getLatestSnapshot(key?: string): Promise<ContextBlock | null>;
-  scheduleUpdates(): void;
-  cancelUpdates(): void;
+  /** Generate a new compressed snapshot from snapshotFn */
+  generateSnapshot(): Promise<string>;
+  /** Get context block (auto-refreshes if stale) */
+  getContext(): Promise<ContextBlock>;
+  /** Force immediate refresh */
+  forceRefresh(): Promise<void>;
+  /** Check if current snapshot is expired */
+  isStale(): boolean;
+  /** Get layer statistics */
+  getStats(): DynamicLayerStats;
 }
 
 export interface ISemanticCacheLayer extends ILayer {
@@ -364,6 +370,35 @@ export interface CompressedSnapshot {
   tokenCount: number;
   createdAt: Date;
   expiresAt: Date;
+}
+
+/** Result from the AdaptiveCompressor pipeline */
+export interface CompressedResult {
+  compressed: string;
+  originalTokens: number;
+  compressedTokens: number;
+  compressionRatio: number;
+  segmentsKept: number;
+  segmentsDropped: number;
+}
+
+/** Custom compression rule for domain-specific patterns */
+export interface CompressionRule {
+  name: string;
+  /** Regex pattern to match */
+  pattern: RegExp;
+  /** Replacement string or function */
+  replacement: string | ((match: string, ...groups: string[]) => string);
+}
+
+export interface DynamicLayerStats {
+  hasSnapshot: boolean;
+  isStale: boolean;
+  originalTokens: number;
+  compressedTokens: number;
+  compressionRatio: number;
+  lastUpdatedAt: Date | null;
+  snapshotAge: number | null;
 }
 
 // ─── Events ──────────────────────────────────────────────────────────────────

@@ -1,3 +1,4 @@
 export { DynamicSnapshot } from './dynamic-snapshot.js';
-export { Compressor } from './compressor.js';
-export { Scheduler } from './scheduler.js';
+export { AdaptiveCompressor } from './compressor.js';
+export type { CompressorOptions } from './compressor.js';
+export { SnapshotScheduler } from './scheduler.js';

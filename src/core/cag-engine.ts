@@ -111,10 +111,8 @@ export class CAGEngine {
     await this.thinkTool.initialize();
     await this.curatedKnowledge.initialize();
 
-    // Start dynamic update scheduler if configured
-    if (this.config.layers.dynamicCAG.enabled && this.config.layers.dynamicCAG.snapshotFn) {
-      this.dynamicCag.scheduleUpdates();
-    }
+    // Dynamic update scheduling is handled externally via SnapshotScheduler
+    // or by calling engine.refreshDynamicContext() from a cron job
 
     this.initialized = true;
     this.startedAt = new Date();
@@ -126,8 +124,6 @@ export class CAGEngine {
    */
   async shutdown(): Promise<void> {
     this.logger.info('Shutting down CAG engine');
-
-    this.dynamicCag.cancelUpdates();
 
     await this.curatedKnowledge.shutdown();
     await this.thinkTool.shutdown();
@@ -219,16 +215,15 @@ export class CAGEngine {
       if (blocks.length > 0) layersUsed.push('static');
     }
 
-    // L2 — Dynamic CAG (with fallback)
+    // L2 — Dynamic CAG (with fallback — getContext handles auto-refresh + fallback internally)
     if (this.config.layers.dynamicCAG.enabled) {
       try {
-        const snapshot = await this.dynamicCag.getLatestSnapshot();
-        if (snapshot) {
+        const snapshot = await this.dynamicCag.getContext();
+        if (snapshot.content) {
           contextBlocks.push(snapshot);
           layersUsed.push('dynamic');
         }
       } catch (error) {
-        // Fallback: L2 fails → no dynamic context (last valid snapshot already expired)
         this.logger.warn('Dynamic snapshot failed, continuing without', { error: String(error) });
         this.emit({ type: 'layerError', layer: 'dynamic', error: error instanceof Error ? error : new Error(String(error)) });
       }
@@ -380,8 +375,8 @@ export class CAGEngine {
           tokenCount: this.staticCag.getEstimatedTokens(),
         },
         dynamicCag: {
-          snapshotCount: 0, // internal detail
-          lastUpdated: null,
+          snapshotCount: this.dynamicCag.getStats().hasSnapshot ? 1 : 0,
+          lastUpdated: this.dynamicCag.getStats().lastUpdatedAt,
         },
         semanticCache: cacheStats,
         thinkTool: { activationCount: this.thinkActivationCount },
@@ -397,14 +392,12 @@ export class CAGEngine {
   async refreshDynamicContext(): Promise<void> {
     if (!this.initialized) throw new Error('CAGEngine not initialized.');
 
-    const snapshotFn = this.config.layers.dynamicCAG.snapshotFn;
-    if (!snapshotFn) {
+    if (!this.config.layers.dynamicCAG.snapshotFn) {
       this.logger.warn('No snapshotFn configured — cannot refresh dynamic context');
       return;
     }
 
-    const freshData = await snapshotFn();
-    await this.dynamicCag.createSnapshot(freshData);
+    await this.dynamicCag.forceRefresh();
     this.emit({ type: 'snapshotUpdated', key: 'default' });
     this.logger.info('Dynamic context refreshed');
   }

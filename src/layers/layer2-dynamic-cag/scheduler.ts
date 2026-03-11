@@ -1,88 +1,77 @@
 /**
- * Layer 2 — Update Scheduler
+ * Layer 2 — Snapshot Scheduler
  *
- * Manages periodic refresh of dynamic data snapshots.
- * Each data source can have its own update interval.
+ * Manages periodic refresh of DynamicCAGLayer snapshots.
+ * Uses setInterval for Node.js environments.
+ * For serverless (Edge Functions): call runNow() from external cron.
  */
 
-import type { DataFetcher } from '@core/types.js';
+import type { DynamicSnapshot } from './dynamic-snapshot.js';
 
-interface ScheduledTask {
-  key: string;
-  fetcher: DataFetcher;
-  intervalMs: number;
-  timer: ReturnType<typeof setInterval> | null;
-  lastRun: Date | null;
-  lastResult: string | null;
-  errorCount: number;
-}
+export class SnapshotScheduler {
+  private readonly layer: DynamicSnapshot;
+  private readonly intervalMs: number;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private running = false;
+  private errorCount = 0;
 
-export class Scheduler {
-  private tasks: Map<string, ScheduledTask> = new Map();
+  constructor(layer: DynamicSnapshot, intervalMinutes: number) {
+    this.layer = layer;
+    this.intervalMs = intervalMinutes * 60 * 1000;
+  }
 
   /**
-   * Schedule a data fetcher to run at a fixed interval.
-   * Replaces any existing schedule for the same key.
+   * Start periodic snapshot updates.
+   * Replaces any existing schedule.
    */
-  schedule(
-    key: string,
-    fetcher: DataFetcher,
-    intervalMs: number,
-    onUpdate: (key: string, data: string) => void,
-  ): void {
-    this.cancel(key);
+  start(): void {
+    this.stop();
+    this.running = true;
+    this.errorCount = 0;
 
-    const task: ScheduledTask = {
-      key,
-      fetcher,
-      intervalMs,
-      timer: null,
-      lastRun: null,
-      lastResult: null,
-      errorCount: 0,
-    };
+    this.timer = setInterval(() => {
+      void this.tick();
+    }, this.intervalMs);
+  }
 
-    task.timer = setInterval(async () => {
-      try {
-        const result = await fetcher();
-        task.lastResult = result;
-        task.lastRun = new Date();
-        task.errorCount = 0;
-        onUpdate(key, result);
-      } catch {
-        task.errorCount++;
-        // Back off after repeated failures
-        if (task.errorCount >= 3) {
-          this.cancel(key);
-        }
+  /**
+   * Stop periodic updates.
+   */
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    this.running = false;
+  }
+
+  /**
+   * Execute a snapshot refresh immediately.
+   * Useful for serverless environments where cron triggers this externally.
+   */
+  async runNow(): Promise<void> {
+    await this.layer.forceRefresh();
+    this.errorCount = 0;
+  }
+
+  isRunning(): boolean {
+    return this.running;
+  }
+
+  getErrorCount(): number {
+    return this.errorCount;
+  }
+
+  private async tick(): Promise<void> {
+    try {
+      await this.layer.generateSnapshot();
+      this.errorCount = 0;
+    } catch {
+      this.errorCount++;
+      // Stop after 3 consecutive failures to avoid hammering
+      if (this.errorCount >= 3) {
+        this.stop();
       }
-    }, intervalMs);
-
-    this.tasks.set(key, task);
-  }
-
-  cancel(key: string): void {
-    const task = this.tasks.get(key);
-    if (task?.timer) {
-      clearInterval(task.timer);
-      task.timer = null;
     }
-    this.tasks.delete(key);
-  }
-
-  cancelAll(): void {
-    for (const key of this.tasks.keys()) {
-      this.cancel(key);
-    }
-  }
-
-  getActiveKeys(): string[] {
-    return Array.from(this.tasks.keys());
-  }
-
-  getTaskStatus(key: string): { lastRun: Date | null; errorCount: number } | null {
-    const task = this.tasks.get(key);
-    if (!task) return null;
-    return { lastRun: task.lastRun, errorCount: task.errorCount };
   }
 }

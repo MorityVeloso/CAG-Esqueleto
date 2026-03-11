@@ -1,110 +1,162 @@
 /**
  * Layer 2 — Dynamic CAG Snapshots
  *
- * Manages compressed snapshots of frequently-changing data.
- * Unlike static cache (L1), this data has a short TTL and
- * is periodically refreshed via snapshotFn.
+ * Maintains a compressed "portrait" of dynamic system data
+ * (financial position, active operations, pending alerts).
+ *
+ * Key behaviors:
+ *  - snapshotFn (user-provided) fetches raw data
+ *  - AdaptiveCompressor compresses it to fit token budget
+ *  - Auto-refreshes when stale (TTL expired)
+ *  - Falls back to last valid snapshot on failure
  */
 
 import type {
   IDynamicCagLayer,
   ContextBlock,
-  CompressedSnapshot,
+  CompressedResult,
+  DynamicLayerStats,
   CAGConfig,
 } from '@core/types.js';
-import { Compressor } from './compressor.js';
-import { Scheduler } from './scheduler.js';
+import { AdaptiveCompressor } from './compressor.js';
+import { countTokens } from '../../utils/token-counter.js';
 
 export class DynamicSnapshot implements IDynamicCagLayer {
   readonly name = 'dynamic-cag';
   readonly order = 2;
 
   private readonly config: CAGConfig;
-  private readonly compressor = new Compressor();
-  private readonly scheduler = new Scheduler();
-  private snapshots: Map<string, CompressedSnapshot> = new Map();
+  private readonly compressor: AdaptiveCompressor;
+  private readonly snapshotFn?: () => Promise<string>;
+
+  private currentSnapshot: string | null = null;
+  private lastResult: CompressedResult | null = null;
+  private lastUpdatedAt: Date | null = null;
+  private lastError: Error | null = null;
 
   constructor(config: CAGConfig) {
     this.config = config;
-  }
+    this.snapshotFn = config.layers.dynamicCAG.snapshotFn;
 
-  async initialize(): Promise<void> {
-    this.cleanExpired();
-  }
-
-  async shutdown(): Promise<void> {
-    this.scheduler.cancelAll();
-    this.snapshots.clear();
-  }
-
-  async createSnapshot(content: string, key = 'default'): Promise<ContextBlock> {
-    const maxTokens = this.config.layers.dynamicCAG.maxTokens;
-    const result = this.compressor.extractive(content, maxTokens);
-
-    const ttlMs = this.config.layers.dynamicCAG.ttl * 1000;
-    const snapshot: CompressedSnapshot = {
-      key,
-      original: content,
-      compressed: result.compressed,
-      compressionRatio: result.ratio,
-      tokenCount: result.compressedTokens,
-      createdAt: new Date(),
-      expiresAt: new Date(Date.now() + ttlMs),
-    };
-
-    this.snapshots.set(key, snapshot);
-
-    return {
-      id: `dynamic-${key}`,
-      layer: 'dynamic',
-      content: snapshot.compressed,
-      tokenCount: snapshot.tokenCount,
-      cachedAt: snapshot.createdAt,
-      expiresAt: snapshot.expiresAt,
-      metadata: { compressionRatio: snapshot.compressionRatio, key },
-    };
-  }
-
-  async getLatestSnapshot(key = 'default'): Promise<ContextBlock | null> {
-    const snapshot = this.snapshots.get(key);
-    if (!snapshot) return null;
-
-    if (new Date() > snapshot.expiresAt) {
-      this.snapshots.delete(key);
-      return null;
-    }
-
-    return {
-      id: `dynamic-${key}`,
-      layer: 'dynamic',
-      content: snapshot.compressed,
-      tokenCount: snapshot.tokenCount,
-      cachedAt: snapshot.createdAt,
-      expiresAt: snapshot.expiresAt,
-      metadata: { compressionRatio: snapshot.compressionRatio, key },
-    };
-  }
-
-  scheduleUpdates(): void {
-    const snapshotFn = this.config.layers.dynamicCAG.snapshotFn;
-    if (!snapshotFn) return;
-
-    const intervalMs = this.config.layers.dynamicCAG.updateInterval * 60 * 1000;
-    this.scheduler.schedule('default', snapshotFn, intervalMs, (_key, data) => {
-      void this.createSnapshot(data);
+    this.compressor = new AdaptiveCompressor({
+      targetRatio: config.layers.dynamicCAG.compressionRatio,
+      maxTokens: config.layers.dynamicCAG.maxTokens,
     });
   }
 
-  cancelUpdates(): void {
-    this.scheduler.cancelAll();
-  }
-
-  private cleanExpired(): void {
-    const now = new Date();
-    for (const [key, snapshot] of this.snapshots) {
-      if (now > snapshot.expiresAt) {
-        this.snapshots.delete(key);
+  async initialize(): Promise<void> {
+    // Generate initial snapshot if snapshotFn is configured
+    if (this.snapshotFn) {
+      try {
+        await this.generateSnapshot();
+      } catch {
+        // Non-fatal — getContext will retry later
       }
     }
+  }
+
+  async shutdown(): Promise<void> {
+    this.currentSnapshot = null;
+    this.lastResult = null;
+    this.lastUpdatedAt = null;
+  }
+
+  /**
+   * Generate a new compressed snapshot by calling snapshotFn.
+   * Returns the compressed text.
+   */
+  async generateSnapshot(): Promise<string> {
+    if (!this.snapshotFn) {
+      throw new Error('No snapshotFn configured for DynamicCAGLayer');
+    }
+
+    const raw = await this.snapshotFn();
+    const result = await this.compressor.compress(raw);
+
+    this.currentSnapshot = result.compressed;
+    this.lastResult = result;
+    this.lastUpdatedAt = new Date();
+    this.lastError = null;
+
+    return result.compressed;
+  }
+
+  /**
+   * Get the current snapshot as a ContextBlock.
+   *
+   * - If within TTL: returns current snapshot
+   * - If stale: auto-refreshes, then returns
+   * - If refresh fails: returns last valid snapshot with warning
+   */
+  async getContext(): Promise<ContextBlock> {
+    if (this.isStale() && this.snapshotFn) {
+      try {
+        await this.generateSnapshot();
+      } catch (error) {
+        this.lastError = error instanceof Error ? error : new Error(String(error));
+        // Fall through to return last valid snapshot
+      }
+    }
+
+    const content = this.currentSnapshot ?? '';
+    const tokens = content ? countTokens(content) : 0;
+    const ttlMs = this.config.layers.dynamicCAG.ttl * 1000;
+
+    return {
+      id: 'dynamic-snapshot',
+      layer: 'dynamic',
+      content,
+      tokenCount: tokens,
+      cachedAt: this.lastUpdatedAt ?? new Date(),
+      expiresAt: new Date((this.lastUpdatedAt?.getTime() ?? Date.now()) + ttlMs),
+      metadata: {
+        compressionRatio: this.lastResult?.compressionRatio ?? 0,
+        segmentsKept: this.lastResult?.segmentsKept ?? 0,
+        segmentsDropped: this.lastResult?.segmentsDropped ?? 0,
+        isStale: this.isStale(),
+        lastError: this.lastError?.message ?? null,
+      },
+    };
+  }
+
+  /**
+   * Force immediate refresh, regardless of TTL.
+   */
+  async forceRefresh(): Promise<void> {
+    await this.generateSnapshot();
+  }
+
+  /**
+   * Check if the current snapshot has expired.
+   */
+  isStale(): boolean {
+    if (!this.lastUpdatedAt) return true;
+
+    const ttlMs = this.config.layers.dynamicCAG.ttl * 1000;
+    return Date.now() > this.lastUpdatedAt.getTime() + ttlMs;
+  }
+
+  /**
+   * Get layer statistics.
+   */
+  getStats(): DynamicLayerStats {
+    return {
+      hasSnapshot: this.currentSnapshot !== null,
+      isStale: this.isStale(),
+      originalTokens: this.lastResult?.originalTokens ?? 0,
+      compressedTokens: this.lastResult?.compressedTokens ?? 0,
+      compressionRatio: this.lastResult?.compressionRatio ?? 0,
+      lastUpdatedAt: this.lastUpdatedAt,
+      snapshotAge: this.lastUpdatedAt
+        ? Date.now() - this.lastUpdatedAt.getTime()
+        : null,
+    };
+  }
+
+  /**
+   * Access the compressor for registering abbreviations/rules.
+   */
+  getCompressor(): AdaptiveCompressor {
+    return this.compressor;
   }
 }
